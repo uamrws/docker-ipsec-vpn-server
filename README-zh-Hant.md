@@ -6,6 +6,8 @@
 
 使用此 Docker 映像快速架設 IPsec VPN 伺服器。支援 IPsec/L2TP、Cisco IPsec 和 IKEv2 協議。
 
+此衍生版本已把 Libreswan 換成 strongSwan，IKEv2 改為 EAP-MSCHAPv2。用法見 [簡體中文說明](README-zh.md)。
+
 本映像以 Alpine 3.23 或 Debian 12 為基礎，並使用 [Libreswan](https://libreswan.org)（IPsec VPN 軟體）和 [xl2tpd](https://github.com/xelerance/xl2tpd)（L2TP 服務程序）。
 
 IPsec VPN 可以加密你的網路流量，以防止在透過網際網路傳送時，你與 VPN 伺服器之間的任何人未經授權存取你的資料。在使用不安全的網路時，這一點特別有用，例如在咖啡廳、機場或旅館房間。

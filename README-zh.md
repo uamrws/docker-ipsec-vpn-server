@@ -6,17 +6,18 @@
 
 使用这个 Docker 镜像快速搭建 IPsec VPN 服务器。支持 IPsec/L2TP，Cisco IPsec 和 IKEv2 协议。
 
-本镜像以 Alpine 3.23 或 Debian 12 为基础，并使用 [Libreswan](https://libreswan.org) (IPsec VPN 软件) 和 [xl2tpd](https://github.com/xelerance/xl2tpd) (L2TP 服务进程)。
+本镜像以 Alpine 3.23 或 Debian 12 为基础，并使用 [strongSwan](https://www.strongswan.org) (IPsec VPN 软件) 和 [xl2tpd](https://github.com/xelerance/xl2tpd) (L2TP 服务进程)。这是 [hwdsl2/docker-ipsec-vpn-server](https://github.com/hwdsl2/docker-ipsec-vpn-server) 的衍生版本：IPsec 守护进程由 Libreswan 换成 strongSwan，并增加 IKEv2 EAP-MSCHAPv2（用户名/密码）支持。
 
 IPsec VPN 可以加密你的网络流量，以防止在通过因特网传送时，你和 VPN 服务器之间的任何人对你的数据的未经授权的访问。在使用不安全的网络时，这是特别有用的，例如在咖啡厅，机场或旅馆房间。
 
 **功能特性：**
 
-- 首次启动时自动生成 VPN 凭证和 IKEv2 配置
+- 首次启动时自动生成 VPN 凭证、CA 和服务端证书
+- IKEv2 使用 EAP-MSCHAPv2：服务端证书认证，客户端用户名和密码认证
 - 支持具有强大和快速加密算法（例如 AES-GCM）的 IKEv2 模式
-- 生成 VPN 配置文件以自动配置 iOS, macOS 和 Android 设备
+- 生成 Apple 描述文件，便于配置 iOS 和 macOS
 - 支持 Windows, macOS, iOS, Android, Chrome OS 和 Linux 客户端
-- 包括辅助脚本以管理 IKEv2 用户和证书
+- 同一组用户名和密码可用于 IKEv2、IPsec/L2TP 和 Cisco IPsec
 - 通过 [GitHub Actions](https://github.com/hwdsl2/docker-ipsec-vpn-server/actions) 自动构建和发布
 - 使用 Docker 卷实现数据持久化
 - 多架构支持：`linux/amd64`、`linux/arm64`、`linux/arm/v7`
@@ -41,7 +42,7 @@ docker run \
     -p 500:500/udp \
     -p 4500:4500/udp \
     -d --privileged \
-    hwdsl2/ipsec-vpn-server
+    ipsec-vpn-server:strongswan
 ```
 
 你的 VPN 登录凭证将会被自动随机生成。请参见[获取 VPN 登录信息](#获取-vpn-登录信息)。
@@ -92,31 +93,20 @@ docker image tag quay.io/hwdsl2/ipsec-vpn-server hwdsl2/ipsec-vpn-server
 | 压缩后大小        | ~ 19 MB                  | ~ 62 MB                        |
 | 基础镜像          | Alpine Linux 3.23        | Debian Linux 12                |
 | 系统架构          | amd64, arm64, arm/v7     | amd64, arm64, arm/v7           |
-| Libreswan 版本   | 5.4.1                    | 5.4.1                          |
+| IPsec 软件        | strongSwan               | strongSwan                     |
 | IPsec/L2TP      | ✅                       | ✅                              |
 | Cisco IPsec     | ✅                       | ✅                              |
-| IKEv2           | ✅                       | ✅                              |
+| IKEv2 EAP-MSCHAPv2 | ✅                    | ✅                              |
 
 **注：** 要使用基于 Debian 的镜像，请将本自述文件中所有的 `hwdsl2/ipsec-vpn-server` 替换为 `hwdsl2/ipsec-vpn-server:debian`。这些镜像当前与 Synology NAS 系统不兼容。
 
-<details>
-<summary>
-我需要使用较旧版本的 Libreswan 版本 4。
-</summary>
-
-一般建议使用最新的 [Libreswan](https://libreswan.org/) 版本 5，它是本项目的默认版本。但是，如果你想要使用较旧版本的 Libreswan 版本 4，你可以从源代码构建 Docker 镜像：
+在本机构建镜像：
 
 ```bash
-git clone https://github.com/hwdsl2/docker-ipsec-vpn-server
-cd docker-ipsec-vpn-server
-# Specify Libreswan version 4
-sed -i 's/SWAN_VER=5\..*/SWAN_VER=4.15/' Dockerfile Dockerfile.debian
-# To build Alpine-based image
-docker build -t hwdsl2/ipsec-vpn-server .
-# To build Debian-based image
-docker build -f Dockerfile.debian -t hwdsl2/ipsec-vpn-server:debian .
+docker build -t ipsec-vpn-server:strongswan .
+# Debian 基础镜像
+docker build -f Dockerfile.debian -t ipsec-vpn-server:strongswan-debian .
 ```
-</details>
 
 ## 如何使用本镜像
 
@@ -141,7 +131,7 @@ VPN_ADDL_USERS=additional_username_1 additional_username_2
 VPN_ADDL_PASSWORDS=additional_password_1 additional_password_2
 ```
 
-以上变量仅适用于 IPsec/L2TP 和 IPsec/XAuth ("Cisco IPsec") 模式。对于 IKEv2，参见[配置并使用 IKEv2 VPN](#配置并使用-ikev2-vpn)。
+同一组用户名和密码用于 IPsec/L2TP、IPsec/XAuth ("Cisco IPsec") 和 IKEv2 EAP-MSCHAPv2。IPsec PSK 只用于前两种模式。IKEv2 的客户端配置见[配置并使用 IKEv2 VPN](#配置并使用-ikev2-vpn)。
 
 > [!IMPORTANT]
 > 在 `env` 文件中填写值时，不要在值外添加引号，也不要在 `=` 两侧添加空格。值中不能包含 `\`、`"` 或 `'`。一个安全的 IPsec PSK 应该至少包含 20 个随机字符。
@@ -201,7 +191,7 @@ docker run \
     -p 500:500/udp \
     -p 4500:4500/udp \
     -d --privileged \
-    hwdsl2/ipsec-vpn-server
+    ipsec-vpn-server:strongswan
 ```
 
 在该命令中，我们使用 `docker run` 的 `-v` 选项来创建一个名为 `ikev2-vpn-data` 的新 [Docker 卷](https://docs.docker.com/storage/volumes/)，并且将它挂载到容器内的 `/etc/ipsec.d` 目录下。IKEv2 的相关数据（比如证书和密钥）在该卷中保存，之后当你需要重新创建 Docker 容器的时候，只需指定同一个卷。
@@ -254,7 +244,7 @@ volumes:
 
 services:
   vpn:
-    image: hwdsl2/ipsec-vpn-server
+    image: ipsec-vpn-server:strongswan
     restart: always
     env_file:
       - ./vpn.env
@@ -315,81 +305,34 @@ Status: Image is up to date for hwdsl2/ipsec-vpn-server:latest
 
 ## 配置并使用 IKEv2 VPN
 
-IKEv2 模式是比 IPsec/L2TP 和 IPsec/XAuth ("Cisco IPsec") 更佳的连接模式，该模式无需 IPsec PSK, 用户名或密码。更多信息请看[这里](https://github.com/hwdsl2/setup-ipsec-vpn/blob/master/docs/ikev2-howto-zh.md)。
+IKEv2 使用 EAP-MSCHAPv2。服务端用证书证明自己的身份，客户端用 `VPN_USER` / `VPN_PASSWORD`（以及 `VPN_ADDL_USERS` 中的额外用户）登录。不需要为每个设备签发客户端证书，也不需要 IPsec PSK。
 
-首先，查看容器的日志以获取 IKEv2 配置信息：
+容器必须把 Docker 卷挂载到 `/etc/ipsec.d`，CA 和服务端证书才会被保存。首次启动会生成这些文件。服务端地址来自公网 IP，或者来自 `VPN_DNS_NAME`。客户端填写的服务器地址必须和证书身份一致。
+
+查看容器日志：
 
 ```bash
 docker logs ipsec-vpn-server
 ```
 
-**注：** 如果你无法找到 IKEv2 配置信息，IKEv2 可能没有在容器中启用。尝试按照[更新 Docker 镜像](#更新-docker-镜像)一节的说明更新 Docker 镜像和容器。
-
-在 IKEv2 安装过程中会创建一个 IKEv2 客户端（默认名称为 `vpnclient`），并且导出它的配置到 **容器内** 的 `/etc/ipsec.d` 目录下。你可以将配置文件复制到 Docker 主机：
+把 CA 和 Apple 描述文件复制到 Docker 主机：
 
 ```bash
-# 查看容器内的 /etc/ipsec.d 目录的文件
-docker exec -it ipsec-vpn-server ls -l /etc/ipsec.d
-# 示例：将一个客户端配置文件从容器复制到 Docker 主机当前目录
-docker cp ipsec-vpn-server:/etc/ipsec.d/vpnclient.p12 ./
-```
-
-**下一步：** [配置你的设备](https://github.com/hwdsl2/setup-ipsec-vpn/blob/master/docs/ikev2-howto-zh.md)以使用 IKEv2 VPN。
-
-<details>
-<summary>
-了解如何管理 IKEv2 客户端。
-</summary>
-
-你可以使用辅助脚本管理 IKEv2 客户端。示例如下。如需自定义客户端选项，可以在不添加参数的情况下运行脚本。
-
-```bash
-# 添加一个客户端（使用默认选项）
-docker exec -it ipsec-vpn-server ikev2.sh --addclient [client name]
-# 导出一个已有的客户端的配置
-docker exec -it ipsec-vpn-server ikev2.sh --exportclient [client name]
-# 列出已有的客户端
+docker cp ipsec-vpn-server:/etc/ipsec.d/ca.crt ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/vpnuser.mobileconfig ./
 docker exec -it ipsec-vpn-server ikev2.sh --listclients
-# 显示使用信息
-docker exec -it ipsec-vpn-server ikev2.sh -h
 ```
 
-**注：** 如果你遇到错误 "executable file not found"，将上面的 `ikev2.sh` 换成 `/opt/src/ikev2.sh`。
-</details>
-<details>
-<summary>
-了解如何更改 IKEv2 服务器地址。
-</summary>
+客户端设置：
 
-在某些情况下，你可能需要更改 IKEv2 服务器地址。例如切换为使用域名，或者在服务器的 IP 更改之后。要更改 IKEv2 服务器地址，首先[在容器中运行 Bash shell](docs/advanced-usage-zh.md#在容器中运行-bash-shell)，然后[按照这里的说明操作](https://github.com/hwdsl2/setup-ipsec-vpn/blob/master/docs/ikev2-howto-zh.md#更改-ikev2-服务器地址)。请注意，容器的日志在你重启 Docker 容器之前将不显示新的 IKEv2 服务器地址。
-</details>
-<details>
-<summary>
-移除 IKEv2 并使用自定义选项重新配置。
-</summary>
+- **Windows：** 把 `ca.crt` 导入“受信任的根证书颁发机构”。新建 VPN，类型选 IKEv2，身份验证选 “Microsoft: 安全密码 (EAP-MSCHAP v2)”。
+- **Android 11 及以上：** 安装 CA 后，VPN 类型选 IKEv2/IPSec MSCHAPv2，填服务器地址、用户名和密码。
+- **iOS / macOS：** 安装 `.mobileconfig`。若系统仍提示不受信任，到证书信任设置里为该 CA 启用完全信任。
+- **strongSwan 客户端：** 网关认证用证书/CA，客户端认证用 EAP-MSCHAPv2。
 
-在某些情况下，你可能需要移除 IKEv2 并使用自定义选项重新配置它。
+用户在 `env` 文件里管理。修改用户后删除并重新创建容器，继续使用同一个 `ikev2-vpn-data` 卷，已安装的 CA 可以保持不变。更换 `VPN_DNS_NAME` 或服务器 IP 时，启动脚本会用原来的 CA 重新签发服务端证书。
 
-**警告：** 这将**永久删除**所有的 IKEv2 配置（包括证书和密钥），并且**不可撤销**！
-
-**选项 1:** 使用辅助脚本移除 IKEv2 并重新配置。
-
-请注意，这将覆盖你在 `env` 文件中指定的变量，例如 `VPN_DNS_NAME` 和 `VPN_CLIENT_NAME`，并且容器的日志将不再显示 IKEv2 的最新信息。
-
-```bash
-# 移除 IKEv2 并删除所有的 IKEv2 配置
-docker exec -it ipsec-vpn-server ikev2.sh --removeikev2
-# 使用自定义选项重新配置 IKEv2
-docker exec -it ipsec-vpn-server ikev2.sh
-```
-
-**选项 2:** 移除 `ikev2-vpn-data` 并重新创建容器。
-
-1. 在纸上记下你所有的 [VPN 登录信息](#获取-vpn-登录信息)。
-1. 删除 Docker 容器：`docker rm -f ipsec-vpn-server`。
-1. 删除 `ikev2-vpn-data` 卷：`docker volume rm ikev2-vpn-data`。
-1. 更新你的 `env` 文件并添加自定义 IKEv2 选项，例如 `VPN_DNS_NAME` 和 `VPN_CLIENT_NAME`，然后重新创建容器。参见[如何使用本镜像](#如何使用本镜像)。
-</details>
+要彻底更换 CA，先记下登录信息，再执行 `docker rm -f ipsec-vpn-server` 和 `docker volume rm ikev2-vpn-data`，然后重新创建容器。
 
 ## 高级用法
 
@@ -415,19 +358,19 @@ docker exec -it ipsec-vpn-server ikev2.sh
 
 ## 技术细节
 
-需要运行以下两个服务：`Libreswan (pluto)` 提供 IPsec VPN，`xl2tpd` 提供 L2TP 支持。
+需要运行以下两个服务：`strongSwan (charon)` 提供 IPsec VPN，`xl2tpd` 提供 L2TP 支持。
 
 默认的 IPsec 配置支持以下协议：
 
 * IPsec/L2TP with PSK
 * IKEv1 with PSK and XAuth ("Cisco IPsec")
-* IKEv2
+* IKEv2 with EAP-MSCHAPv2
 
 所需端口：`500/udp` 和 `4500/udp`（IPsec）
 
 ## 授权协议
 
-**注：** 预构建镜像中的软件组件（例如 Libreswan 和 xl2tpd）在其各自版权所有者选择的相应许可下。对于任何预构建的镜像的使用，用户有责任确保对该镜像的任何使用符合其中包含的所有软件的任何相关许可。
+**注：** 镜像中的软件组件（例如 strongSwan 和 xl2tpd）在其各自版权所有者选择的相应许可下。对于任何预构建的镜像的使用，用户有责任确保对该镜像的任何使用符合其中包含的所有软件的任何相关许可。
 
 版权所有 (C) 2016-2026 [Lin Song](https://github.com/hwdsl2) [![View my profile on LinkedIn](https://static.licdn.com/scds/common/u/img/webpromo/btn_viewmy_160x25.png)](https://www.linkedin.com/in/linsongui)   
 基于 [Thomas Sarlandie 的工作](https://github.com/sarfata/voodooprivacy) (版权所有 2012)

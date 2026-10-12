@@ -3,7 +3,8 @@ volumes:
 
 services:
   vpn:
-    image: hwdsl2/ipsec-vpn-server
+    build: .
+    image: ipsec-vpn-server:strongswan
     restart: always
     env_file:
       - ./vpn.env

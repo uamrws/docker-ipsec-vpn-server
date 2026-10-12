@@ -6,6 +6,8 @@
 
 Docker-образ для запуска сервера IPsec VPN с поддержкой IPsec/L2TP, Cisco IPsec и IKEv2.
 
+В этой версии Libreswan заменён на strongSwan, а IKEv2 работает через EAP-MSCHAPv2. Описание: [README-zh.md](README-zh.md).
+
 Основан на Alpine 3.23 или Debian 12 с использованием [Libreswan](https://libreswan.org) (программное обеспечение IPsec VPN) и [xl2tpd](https://github.com/xelerance/xl2tpd) (демон L2TP).
 
 IPsec VPN шифрует сетевой трафик, поэтому никто между вами и VPN-сервером не сможет перехватывать ваши данные во время их передачи через Интернет. Это особенно полезно при использовании незащищённых сетей, например в кофейнях, аэропортах или гостиничных номерах.

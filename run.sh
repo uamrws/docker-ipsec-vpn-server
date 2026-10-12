@@ -25,6 +25,158 @@ onespace() { printf '%s' "$1" | tr -s ' '; }
 noquotes() { printf '%s' "$1" | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"; }
 noquotes2() { printf '%s' "$1" | sed -e 's/" "/ /g' -e "s/' '/ /g"; }
 
+ip2int() {
+  local a b c d
+  IFS=. read -r a b c d <<< "$1"
+  printf '%s\n' $(( (a << 24) + (b << 16) + (c << 8) + d ))
+}
+
+ip_in_cidr() {
+  local ip_i base_i bits mask_i
+  ip_i=$(ip2int "$1")
+  base_i=$(ip2int "${2%/*}")
+  bits=${2#*/}
+  if [ "$bits" -eq 0 ]; then
+    return 0
+  fi
+  mask_i=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+  [ $((ip_i & mask_i)) -eq $((base_i & mask_i)) ]
+}
+
+xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+new_uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen
+  else
+    cat /proc/sys/kernel/random/uuid
+  fi
+}
+
+have_plugin() {
+  local name=$1 dir f glob
+  glob=$(shopt -p nullglob)
+  shopt -s nullglob
+  for dir in /usr/lib/ipsec/plugins /usr/libexec/ipsec/plugins /usr/lib/strongswan/plugins; do
+    for f in "$dir"/*"$name"*.so; do
+      eval "$glob"
+      return 0
+    done
+  done
+  eval "$glob"
+  return 1
+}
+
+write_mobileconfig() {
+  local user=$1 pass=$2 outfile=$3 include_pass=$4
+  local uuid_root uuid_ca uuid_vpn display
+  uuid_root=$(new_uuid)
+  uuid_ca=$(new_uuid)
+  uuid_vpn=$(new_uuid)
+  display=${VPN_CLIENT_NAME:-IKEv2 VPN}
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+    printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    printf '%s\n' '<plist version="1.0">'
+    printf '%s\n' '<dict>'
+    printf '%s\n' '  <key>PayloadDisplayName</key>'
+    printf '%s\n' "  <string>$(xml_escape "$display")</string>"
+    printf '%s\n' '  <key>PayloadIdentifier</key>'
+    printf '%s\n' "  <string>com.strongswan.ikev2.$(xml_escape "$user")</string>"
+    printf '%s\n' '  <key>PayloadType</key>'
+    printf '%s\n' '  <string>Configuration</string>'
+    printf '%s\n' '  <key>PayloadUUID</key>'
+    printf '%s\n' "  <string>$uuid_root</string>"
+    printf '%s\n' '  <key>PayloadVersion</key>'
+    printf '%s\n' '  <integer>1</integer>'
+    printf '%s\n' '  <key>PayloadContent</key>'
+    printf '%s\n' '  <array>'
+    printf '%s\n' '    <dict>'
+    printf '%s\n' '      <key>PayloadType</key>'
+    printf '%s\n' '      <string>com.apple.security.root</string>'
+    printf '%s\n' '      <key>PayloadIdentifier</key>'
+    printf '%s\n' "      <string>com.strongswan.ikev2.ca.$(xml_escape "$user")</string>"
+    printf '%s\n' '      <key>PayloadUUID</key>'
+    printf '%s\n' "      <string>$uuid_ca</string>"
+    printf '%s\n' '      <key>PayloadVersion</key>'
+    printf '%s\n' '      <integer>1</integer>'
+    printf '%s\n' '      <key>PayloadDisplayName</key>'
+    printf '%s\n' '      <string>IKEv2 VPN CA</string>'
+    printf '%s\n' '      <key>PayloadCertificateFileName</key>'
+    printf '%s\n' '      <string>ca.crt</string>'
+    printf '%s\n' '      <key>PayloadContent</key>'
+    printf '%s\n' '      <data>'
+    openssl x509 -in "$CA_CRT" -outform der | openssl base64
+    printf '%s\n' '      </data>'
+    printf '%s\n' '    </dict>'
+    printf '%s\n' '    <dict>'
+    printf '%s\n' '      <key>PayloadType</key>'
+    printf '%s\n' '      <string>com.apple.vpn.managed</string>'
+    printf '%s\n' '      <key>PayloadIdentifier</key>'
+    printf '%s\n' "      <string>com.strongswan.ikev2.vpn.$(xml_escape "$user")</string>"
+    printf '%s\n' '      <key>PayloadUUID</key>'
+    printf '%s\n' "      <string>$uuid_vpn</string>"
+    printf '%s\n' '      <key>PayloadVersion</key>'
+    printf '%s\n' '      <integer>1</integer>'
+    printf '%s\n' '      <key>PayloadDisplayName</key>'
+    printf '%s\n' "      <string>$(xml_escape "$display")</string>"
+    printf '%s\n' '      <key>UserDefinedName</key>'
+    printf '%s\n' "      <string>$(xml_escape "$display")</string>"
+    printf '%s\n' '      <key>VPNType</key>'
+    printf '%s\n' '      <string>IKEv2</string>'
+    printf '%s\n' '      <key>IKEv2</key>'
+    printf '%s\n' '      <dict>'
+    printf '%s\n' '        <key>RemoteAddress</key>'
+    printf '%s\n' "        <string>$(xml_escape "$server_addr")</string>"
+    printf '%s\n' '        <key>RemoteIdentifier</key>'
+    printf '%s\n' "        <string>$(xml_escape "$server_addr")</string>"
+    printf '%s\n' '        <key>LocalIdentifier</key>'
+    printf '%s\n' "        <string>$(xml_escape "$user")</string>"
+    printf '%s\n' '        <key>AuthenticationMethod</key>'
+    printf '%s\n' '        <string>None</string>'
+    printf '%s\n' '        <key>ExtendedAuthEnabled</key>'
+    printf '%s\n' '        <integer>1</integer>'
+    printf '%s\n' '        <key>AuthName</key>'
+    printf '%s\n' "        <string>$(xml_escape "$user")</string>"
+    if [ "$include_pass" = yes ]; then
+      printf '%s\n' '        <key>AuthPassword</key>'
+      printf '%s\n' "        <string>$(xml_escape "$pass")</string>"
+    fi
+    printf '%s\n' '        <key>DeadPeerDetectionRate</key>'
+    printf '%s\n' '        <string>Medium</string>'
+    printf '%s\n' '        <key>DisableMOBIKE</key>'
+    printf '%s\n' '        <integer>0</integer>'
+    printf '%s\n' '        <key>EnablePFS</key>'
+    printf '%s\n' '        <integer>0</integer>'
+    printf '%s\n' '        <key>IKESecurityAssociationParameters</key>'
+    printf '%s\n' '        <dict>'
+    printf '%s\n' '          <key>EncryptionAlgorithm</key>'
+    printf '%s\n' '          <string>AES-256</string>'
+    printf '%s\n' '          <key>IntegrityAlgorithm</key>'
+    printf '%s\n' '          <string>SHA2-256</string>'
+    printf '%s\n' '          <key>DiffieHellmanGroup</key>'
+    printf '%s\n' '          <integer>14</integer>'
+    printf '%s\n' '        </dict>'
+    printf '%s\n' '        <key>ChildSecurityAssociationParameters</key>'
+    printf '%s\n' '        <dict>'
+    printf '%s\n' '          <key>EncryptionAlgorithm</key>'
+    printf '%s\n' '          <string>AES-256</string>'
+    printf '%s\n' '          <key>IntegrityAlgorithm</key>'
+    printf '%s\n' '          <string>SHA2-256</string>'
+    printf '%s\n' '          <key>DiffieHellmanGroup</key>'
+    printf '%s\n' '          <integer>14</integer>'
+    printf '%s\n' '        </dict>'
+    printf '%s\n' '      </dict>'
+    printf '%s\n' '    </dict>'
+    printf '%s\n' '  </array>'
+    printf '%s\n' '</dict>'
+    printf '%s\n' '</plist>'
+  } > "$outfile"
+  chmod 600 "$outfile"
+}
+
 check_ip() {
   IP_REGEX='^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'
   printf '%s' "$1" | tr -d '\n' | grep -Eq "$IP_REGEX"
@@ -247,6 +399,14 @@ if [ -n "$VPN_IP6_NET" ]; then
   VPN_IP6_NET=$(nospaces "$VPN_IP6_NET")
   VPN_IP6_NET=$(noquotes "$VPN_IP6_NET")
 fi
+if [ -n "$VPN_IKEV2_NET" ]; then
+  VPN_IKEV2_NET=$(nospaces "$VPN_IKEV2_NET")
+  VPN_IKEV2_NET=$(noquotes "$VPN_IKEV2_NET")
+fi
+if [ -n "$VPN_IKEV2_POOL" ]; then
+  VPN_IKEV2_POOL=$(nospaces "$VPN_IKEV2_POOL")
+  VPN_IKEV2_POOL=$(noquotes "$VPN_IKEV2_POOL")
+fi
 
 ip6=""
 if [ -n "$VPN_PUBLIC_IP6" ]; then
@@ -347,6 +507,8 @@ L2TP_LOCAL=${VPN_L2TP_LOCAL:-'192.168.42.1'}
 L2TP_POOL=${VPN_L2TP_POOL:-'192.168.42.10-192.168.42.250'}
 XAUTH_NET=${VPN_XAUTH_NET:-'192.168.43.0/24'}
 XAUTH_POOL=${VPN_XAUTH_POOL:-'192.168.43.10-192.168.43.250'}
+IKEV2_NET=${VPN_IKEV2_NET:-'192.168.44.0/24'}
+IKEV2_POOL=${VPN_IKEV2_POOL:-'192.168.44.10-192.168.44.250'}
 IP6_NET=${VPN_IP6_NET:-'fddd:500:500:500::/64'}
 DNS_SRV1=${VPN_DNS_SRV1:-'8.8.8.8'}
 DNS_SRV2=${VPN_DNS_SRV2:-'8.8.4.4'}
@@ -367,7 +529,7 @@ sha2_truncbug=no
 case $VPN_SHA2_TRUNCBUG in
   [yY][eE][sS])
     echo
-    echo "Setting sha2-truncbug to yes in ipsec.conf..."
+    echo "Enabling the SHA-2 truncation workaround in strongSwan..."
     sha2_truncbug=yes
     ;;
 esac
@@ -389,15 +551,17 @@ case $VPN_IKEV2_ONLY in
     disable_ipsec_xauth=yes
     ;;
 esac
-ike_algs="aes256-sha2;modp2048,aes128-sha2;modp2048,aes256-sha1;modp2048,aes128-sha1;modp2048"
-ike_algs_addl=",aes256-sha2;modp1536,aes128-sha1;modp1536"
+ike_proposals="aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp2048,aes128-sha1-modp2048"
 case $VPN_ENABLE_MODP1536 in
   [yY][eE][sS])
     echo
-    echo "Enabling modp1536 in ipsec.conf..."
-    ike_algs="$ike_algs$ike_algs_addl"
+    echo "Adding modp1536 to the IKEv1 proposals..."
+    ike_proposals="${ike_proposals},aes256-sha256-modp1536,aes128-sha1-modp1536"
     ;;
 esac
+esp_proposals="aes256gcm16,aes128gcm16,aes256-sha256,aes128-sha256,aes256-sha1,aes128-sha1"
+ikev2_proposals="aes256gcm16-prfsha256-ecp256,aes128gcm16-prfsha256-ecp256,aes256gcm16-prfsha256-modp2048,aes128gcm16-prfsha256-modp2048,aes256-sha256-modp2048,aes128-sha256-modp2048"
+ikev2_esp="aes256gcm16,aes128gcm16,aes256-sha256,aes128-sha256"
 
 if [ "$disable_ipsec_l2tp" = yes ] && [ "$disable_ipsec_xauth" = yes ]; then
 cat <<'EOF'
@@ -424,78 +588,304 @@ Note: IPsec/XAuth ("Cisco IPsec") mode is disabled via env file option.
 EOF
 fi
 
-# Create IPsec config
-cat > /etc/ipsec.conf <<EOF
-version 2.0
-
-config setup
-  ikev1-policy=accept
-  virtual-private=%v4:10.0.0.0/8,%v4:192.168.0.0/16,%v4:172.16.0.0/12,%v4:!$L2TP_NET,%v4:!$XAUTH_NET$vp_ip6
-  uniqueids=no
-
-conn shared
-  left=%defaultroute
-  leftid=$public_ip
-  right=%any
-  encapsulation=yes
-  authby=secret
-  pfs=no
-  rekey=no
-  dpddelay=30
-  dpdtimeout=300
-  ikev2=never
-  ike=$ike_algs
-  phase2alg=aes_gcm-null,aes128-sha1,aes256-sha1,aes256-sha2_512,aes128-sha2,aes256-sha2
-  ikelifetime=24h
-  salifetime=24h
-  sha2-truncbug=$sha2_truncbug
-
-EOF
-
-if [ "$disable_ipsec_l2tp" != yes ]; then
-cat >> /etc/ipsec.conf <<'EOF'
-conn l2tp-psk
-  auto=add
-  leftprotoport=17/1701
-  rightprotoport=17/%any
-  type=transport
-  also=shared
-
-EOF
+if ! check_cidr "$IKEV2_NET"; then
+  echo "Warning: Invalid VPN_IKEV2_NET. Using 192.168.44.0/24." >&2
+  IKEV2_NET='192.168.44.0/24'
 fi
-if [ "$disable_ipsec_xauth" != yes ]; then
-cat >> /etc/ipsec.conf <<EOF
-conn xauth-psk
-  auto=add
-  leftsubnet=0.0.0.0/0
-  rightaddresspool=$XAUTH_POOL
-  modecfgdns=$DNS_SRVS
-  leftxauthserver=yes
-  rightxauthclient=yes
-  leftmodecfgserver=yes
-  rightmodecfgclient=yes
-  modecfgpull=yes
-  cisco-unity=yes
-  also=shared
-
-EOF
+if ! printf '%s' "$IKEV2_POOL" | grep -Eq '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])-(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'; then
+  echo "Warning: Invalid VPN_IKEV2_POOL. Using 192.168.44.10-192.168.44.250." >&2
+  IKEV2_POOL='192.168.44.10-192.168.44.250'
+fi
+pool_first=${IKEV2_POOL%%-*}
+if ! ip_in_cidr "$pool_first" "$IKEV2_NET"; then
+  echo "Warning: VPN_IKEV2_POOL is outside VPN_IKEV2_NET. IKEv2 client NAT may fail." >&2
 fi
 
-cat >> /etc/ipsec.conf <<'EOF'
-include /etc/ipsec.d/*.conf
-EOF
-
-if uname -r | grep -qi 'coreos'; then
-  sed -i '/phase2alg/s/,aes256-sha2_512//' /etc/ipsec.conf
+if [ -n "$VPN_DNS_SRV1" ] && [ -z "$VPN_DNS_SRV2" ]; then
+  dns_list=$DNS_SRV1
+else
+  dns_list="$DNS_SRV1, $DNS_SRV2"
 fi
-if grep -qs ike-frag /etc/ipsec.d/ikev2.conf; then
-  sed -i 's/^[[:space:]]\+ike-frag=/  fragmentation=/' /etc/ipsec.d/ikev2.conf
+ikev2_ts="0.0.0.0/0"
+if [ -n "$VPN_SPLIT_IKEV2" ]; then
+  ikev2_ts=$VPN_SPLIT_IKEV2
+elif [ -n "$ip6" ]; then
+  ikev2_ts="0.0.0.0/0, ::/0"
+fi
+ikev2_addrs=$IKEV2_POOL
+if [ -n "$ip6" ]; then
+  ip6_base=${IP6_NET%/*}
+  ikev2_addrs="$IKEV2_POOL, ${ip6_base}10-${ip6_base}fe"
 fi
 
-# Specify IPsec PSK
-cat > /etc/ipsec.secrets <<EOF
-%any  %any  : PSK "$VPN_IPSEC_PSK"
+ikev2_enabled=no
+mkdir -p /etc/ipsec.d
+if grep -q " /etc/ipsec.d " /proc/mounts; then
+  if have_plugin eap-mschapv2 && have_plugin eap-identity; then
+    ikev2_enabled=yes
+  else
+    echo "Warning: strongSwan EAP-MSCHAPv2 plugins are missing. IKEv2 is disabled." >&2
+  fi
+else
+  echo
+  echo "Warning: /etc/ipsec.d is not a mounted volume, so IKEv2 EAP-MSCHAPv2 is not enabled."
+  echo "         Mount a Docker volume at /etc/ipsec.d to keep the CA and server certificate."
+fi
+if [ "$disable_ipsec_xauth" != yes ] && ! have_plugin xauth-generic; then
+  echo "Warning: strongSwan xauth-generic plugin is missing. Cisco IPsec is disabled." >&2
+  disable_ipsec_xauth=yes
+fi
+
+SWAN_DIR=/etc/ipsec.d/swanctl
+CA_KEY=/etc/ipsec.d/private/ca.key
+CA_CRT="$SWAN_DIR/x509ca/ca.crt"
+CA_SRL=/etc/ipsec.d/ca.srl
+SRV_KEY="$SWAN_DIR/private/server.key"
+SRV_CRT="$SWAN_DIR/x509/server.crt"
+SRV_CSR="$SWAN_DIR/private/server.csr"
+ID_FILE=/etc/ipsec.d/ikev2-server-id
+mkdir -p "$SWAN_DIR/x509" "$SWAN_DIR/x509ca" "$SWAN_DIR/x509crl" \
+  "$SWAN_DIR/x509ocsp" "$SWAN_DIR/x509aa" "$SWAN_DIR/x509ac" \
+  "$SWAN_DIR/private" "$SWAN_DIR/pubkey" "$SWAN_DIR/rsa" "$SWAN_DIR/ecdsa" \
+  "$SWAN_DIR/pkcs8" "$SWAN_DIR/pkcs12" "$SWAN_DIR/bliss" /etc/ipsec.d/private
+chmod 700 "$SWAN_DIR/private" /etc/ipsec.d/private
+if [ -f "$SWAN_DIR/private/ca.key" ] && [ ! -s "$CA_KEY" ]; then
+  mv "$SWAN_DIR/private/ca.key" "$CA_KEY"
+fi
+rm -f "$SWAN_DIR/private/ca.srl"
+if [ -d /etc/swanctl ] && [ ! -L /etc/swanctl ]; then
+  rm -rf /etc/swanctl
+fi
+ln -sfn "$SWAN_DIR" /etc/swanctl
+
+include_eap_pass=yes
+case $VPN_PROTECT_CONFIG in
+  [yY][eE][sS]) include_eap_pass=no ;;
+esac
+
+if [ "$ikev2_enabled" = yes ]; then
+  if [ ! -s "$CA_KEY" ] || [ ! -s "$CA_CRT" ]; then
+    echo
+    echo "Generating IKEv2 CA certificate..."
+    openssl req -x509 -newkey rsa:3072 -sha256 -days 3650 -nodes \
+      -keyout "$CA_KEY" -out "$CA_CRT" \
+      -subj "/CN=IKEv2 VPN CA" \
+      -addext basicConstraints=critical,CA:TRUE \
+      -addext keyUsage=critical,keyCertSign,cRLSign \
+      || exiterr "Failed to generate the IKEv2 CA certificate."
+  fi
+  if [ ! -s "$SRV_KEY" ] || [ ! -s "$SRV_CRT" ] || [ "$(cat "$ID_FILE" 2>/dev/null || true)" != "$server_addr" ]; then
+    echo "Generating IKEv2 server certificate for $server_addr..."
+    san="IP:${public_ip}"
+    if [ -n "$VPN_DNS_NAME" ]; then
+      san="DNS:${VPN_DNS_NAME},IP:${public_ip}"
+    fi
+    openssl req -newkey rsa:3072 -nodes -keyout "$SRV_KEY" -out "$SRV_CSR" \
+      -subj "/CN=${server_addr}" \
+      || exiterr "Failed to generate the IKEv2 server key."
+    openssl x509 -req -in "$SRV_CSR" -CA "$CA_CRT" -CAkey "$CA_KEY" \
+      -CAserial "$CA_SRL" -CAcreateserial \
+      -out "$SRV_CRT" -days 1825 -sha256 \
+      -extfile <(printf '%s\n' \
+        'basicConstraints=CA:FALSE' \
+        'keyUsage=digitalSignature,keyEncipherment' \
+        'extendedKeyUsage=serverAuth,1.3.6.1.5.5.8.2.2' \
+        "subjectAltName=${san}") \
+      || exiterr "Failed to sign the IKEv2 server certificate."
+    rm -f "$SRV_CSR"
+    printf '%s\n' "$server_addr" > "$ID_FILE"
+  fi
+  cp -f "$CA_CRT" /etc/ipsec.d/ca.crt
+  cp -f "$SRV_CRT" /etc/ipsec.d/server.crt
+  chmod 600 "$CA_KEY" "$SRV_KEY"
+  chmod 644 "$CA_CRT" "$SRV_CRT" /etc/ipsec.d/ca.crt /etc/ipsec.d/server.crt
+fi
+
+# Create strongSwan swanctl configuration
+{
+  printf '%s\n' 'connections {'
+  if [ "$disable_ipsec_l2tp" != yes ]; then
+    cat <<EOF
+    l2tp-psk {
+        version = 1
+        local_addrs = %any
+        remote_addrs = %any
+        proposals = $ike_proposals
+        rekey_time = 0s
+        encap = yes
+        fragmentation = yes
+        dpd_delay = 30s
+        dpd_timeout = 300s
+        unique = never
+        send_certreq = no
+        local-psk {
+            auth = psk
+            id = $public_ip
+        }
+        remote-psk {
+            auth = psk
+        }
+        children {
+            l2tp {
+                mode = transport
+                local_ts = dynamic[udp/1701]
+                remote_ts = dynamic[udp]
+                esp_proposals = $esp_proposals
+                rekey_time = 0s
+                dpd_action = none
+            }
+        }
+    }
 EOF
+  fi
+  if [ "$disable_ipsec_xauth" != yes ]; then
+    cat <<EOF
+    xauth-psk {
+        version = 1
+        local_addrs = %any
+        remote_addrs = %any
+        proposals = $ike_proposals
+        rekey_time = 0s
+        encap = yes
+        fragmentation = yes
+        dpd_delay = 30s
+        dpd_timeout = 300s
+        unique = never
+        send_certreq = no
+        pools = xauth
+        local-psk {
+            auth = psk
+            id = $public_ip
+        }
+        remote-psk {
+            auth = psk
+        }
+        remote-xauth {
+            auth = xauth
+        }
+        children {
+            xauth {
+                local_ts = 0.0.0.0/0
+                esp_proposals = $esp_proposals
+                rekey_time = 0s
+                dpd_action = none
+            }
+        }
+    }
+EOF
+  fi
+  if [ "$ikev2_enabled" = yes ]; then
+    cat <<EOF
+    ikev2-eap {
+        version = 2
+        local_addrs = %any
+        remote_addrs = %any
+        proposals = $ikev2_proposals
+        rekey_time = 0s
+        encap = yes
+        fragmentation = yes
+        dpd_delay = 30s
+        dpd_timeout = 300s
+        unique = never
+        send_cert = always
+        send_certreq = no
+        pools = ikev2
+        local {
+            auth = pubkey
+            certs = server.crt
+            id = $server_addr
+        }
+        remote {
+            auth = eap-mschapv2
+            eap_id = %any
+        }
+        children {
+            ikev2-eap {
+                local_ts = $ikev2_ts
+                esp_proposals = $ikev2_esp
+                rekey_time = 0s
+                dpd_action = none
+            }
+        }
+    }
+EOF
+  fi
+  printf '%s\n' '}'
+  printf '%s\n' ''
+  printf '%s\n' 'pools {'
+  if [ "$disable_ipsec_xauth" != yes ]; then
+    cat <<EOF
+    xauth {
+        addrs = $XAUTH_POOL
+        dns = $dns_list
+    }
+EOF
+  fi
+  if [ "$ikev2_enabled" = yes ]; then
+    cat <<EOF
+    ikev2 {
+        addrs = $ikev2_addrs
+        dns = $dns_list
+    }
+EOF
+  fi
+  printf '%s\n' '}'
+  printf '%s\n' ''
+  printf '%s\n' 'secrets {'
+  if [ "$disable_ipsec_l2tp" != yes ] || [ "$disable_ipsec_xauth" != yes ]; then
+    printf '    ike-psk {\n        secret = "%s"\n    }\n' "$VPN_IPSEC_PSK"
+  fi
+  if [ "$ikev2_enabled" = yes ]; then
+    printf '%s\n' '    private-server {' '        file = server.key' '    }'
+  fi
+  secret_index=0
+  emit_user_secret() {
+    secret_index=$((secret_index + 1))
+    if [ "$disable_ipsec_xauth" != yes ]; then
+      printf '    xauth-%s {\n        id = "%s"\n        secret = "%s"\n    }\n' \
+        "$secret_index" "$1" "$2"
+    fi
+    if [ "$ikev2_enabled" = yes ]; then
+      printf '    eap-%s {\n        id = "%s"\n        secret = "%s"\n    }\n' \
+        "$secret_index" "$1" "$2"
+    fi
+  }
+  emit_user_secret "$VPN_USER" "$VPN_PASSWORD"
+  if [ -n "$VPN_ADDL_USERS" ] && [ -n "$VPN_ADDL_PASSWORDS" ]; then
+    count=1
+    addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -d ' ' -f 1)
+    addl_password=$(printf '%s' "$VPN_ADDL_PASSWORDS" | cut -d ' ' -f 1)
+    while [ -n "$addl_user" ] && [ -n "$addl_password" ]; do
+      emit_user_secret "$addl_user" "$addl_password"
+      count=$((count + 1))
+      addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -s -d ' ' -f "$count")
+      addl_password=$(printf '%s' "$VPN_ADDL_PASSWORDS" | cut -s -d ' ' -f "$count")
+    done
+  fi
+  printf '%s\n' '}'
+} > /etc/swanctl/swanctl.conf
+chmod 600 /etc/swanctl/swanctl.conf
+
+if [ "$ikev2_enabled" = yes ]; then
+  : > /etc/ipsec.d/eap-users
+  printf '%s\n' "$VPN_USER" >> /etc/ipsec.d/eap-users
+  safe_user=$(printf '%s' "$VPN_USER" | tr -c 'A-Za-z0-9_.-' '_')
+  write_mobileconfig "$VPN_USER" "$VPN_PASSWORD" "/etc/ipsec.d/${safe_user}.mobileconfig" "$include_eap_pass"
+  if [ -n "$VPN_ADDL_USERS" ] && [ -n "$VPN_ADDL_PASSWORDS" ]; then
+    count=1
+    addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -d ' ' -f 1)
+    addl_password=$(printf '%s' "$VPN_ADDL_PASSWORDS" | cut -d ' ' -f 1)
+    while [ -n "$addl_user" ] && [ -n "$addl_password" ]; do
+      printf '%s\n' "$addl_user" >> /etc/ipsec.d/eap-users
+      safe_user=$(printf '%s' "$addl_user" | tr -c 'A-Za-z0-9_.-' '_')
+      write_mobileconfig "$addl_user" "$addl_password" "/etc/ipsec.d/${safe_user}.mobileconfig" "$include_eap_pass"
+      count=$((count + 1))
+      addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -s -d ' ' -f "$count")
+      addl_password=$(printf '%s' "$VPN_ADDL_PASSWORDS" | cut -s -d ' ' -f "$count")
+    done
+  fi
+  chmod 644 /etc/ipsec.d/eap-users
+fi
 
 # Create xl2tpd config
 cat > /etc/xl2tpd/xl2tpd.conf <<EOF
@@ -540,11 +930,6 @@ cat > /etc/ppp/chap-secrets <<EOF
 "$VPN_USER" l2tpd "$VPN_PASSWORD" *
 EOF
 
-VPN_PASSWORD_ENC=$(openssl passwd -1 "$VPN_PASSWORD")
-cat > /etc/ipsec.d/passwd <<EOF
-$VPN_USER:$VPN_PASSWORD_ENC:xauth-psk
-EOF
-
 if [ -n "$VPN_ADDL_USERS" ] && [ -n "$VPN_ADDL_PASSWORDS" ]; then
   count=1
   addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -d ' ' -f 1)
@@ -552,28 +937,18 @@ if [ -n "$VPN_ADDL_USERS" ] && [ -n "$VPN_ADDL_PASSWORDS" ]; then
   addl_ip=$(printf '%s' "$VPN_ADDL_IP_ADDRS" | cut -d ' ' -f 1)
   while [ -n "$addl_user" ] && [ -n "$addl_password" ]; do
     addl_ip_l2tp="$addl_ip"
-    addl_ip_xauth="$addl_ip"
     if [ "$addl_ip" = "*" ] || ! check_ip "$addl_ip"; then
       addl_ip_l2tp=""
-      addl_ip_xauth=""
-    elif [ "$L2TP_NET" = "192.168.42.0/24" ] && [ "$XAUTH_NET" = "192.168.43.0/24" ]; then
+    elif [ "$L2TP_NET" = "192.168.42.0/24" ]; then
       addl_ip_part=$(printf '%s' "$addl_ip" | cut -f 1-3 -d '.')
-      if [ "$addl_ip_part" = "192.168.42" ]; then
-        addl_ip_xauth=""
-      elif [ "$addl_ip_part" = "192.168.43" ]; then
+      if [ "$addl_ip_part" != "192.168.42" ]; then
         addl_ip_l2tp=""
-      else
-        addl_ip_l2tp=""
-        addl_ip_xauth=""
       fi
+    elif ! ip_in_cidr "$addl_ip" "$L2TP_NET"; then
+      addl_ip_l2tp=""
     fi
 cat >> /etc/ppp/chap-secrets <<EOF
 "$addl_user" l2tpd "$addl_password" ${addl_ip_l2tp:-*}
-EOF
-    [ -n "$addl_ip_xauth" ] && addl_ip_xauth=$(printf '%s' ":$addl_ip_xauth")
-    addl_password_enc=$(openssl passwd -1 "$addl_password")
-cat >> /etc/ipsec.d/passwd <<EOF
-$addl_user:$addl_password_enc:xauth-psk${addl_ip_xauth}
 EOF
     count=$((count+1))
     addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -s -d ' ' -f "$count")
@@ -625,6 +1000,8 @@ if ! iptables -t nat -C POSTROUTING -s "$L2TP_NET" -o "$NET_IFACE" -j MASQUERADE
   $ipf 5 -i "$NET_IFACE" -d "$XAUTH_NET" -m conntrack --ctstate "$res" -j ACCEPT
   $ipf 6 -s "$XAUTH_NET" -o "$NET_IFACE" -j ACCEPT
   $ipf 7 -s "$XAUTH_NET" -o ppp+ -j ACCEPT
+  $ipf 8 -i "$NET_IFACE" -d "$IKEV2_NET" -m conntrack --ctstate "$res" -j ACCEPT
+  $ipf 9 -s "$IKEV2_NET" -o "$NET_IFACE" -j ACCEPT
   # Client-to-client traffic is allowed by default. To *disallow* such traffic,
   # uncomment below and restart the Docker container.
   # $ipf 2 -i ppp+ -o ppp+ -s "$L2TP_NET" -d "$L2TP_NET" -j DROP
@@ -636,6 +1013,7 @@ if ! iptables -t nat -C POSTROUTING -s "$L2TP_NET" -o "$NET_IFACE" -j MASQUERADE
     $ipp -s "$XAUTH_NET" -o "$NET_IFACE" ! -d "$XAUTH_NET" -j MASQUERADE
   fi
   $ipp -s "$L2TP_NET" -o "$NET_IFACE" -j MASQUERADE
+  $ipp -s "$IKEV2_NET" -o "$NET_IFACE" -j MASQUERADE
 fi
 
 if [ -n "$ip6" ]; then
@@ -675,31 +1053,110 @@ case $VPN_ANDROID_MTU_FIX in
 esac
 
 # Update file attributes
-chmod 600 /etc/ipsec.secrets /etc/ppp/chap-secrets /etc/ipsec.d/passwd
+chmod 600 /etc/ppp/chap-secrets
+if [ -f /etc/swanctl/swanctl.conf ]; then
+  chmod 600 /etc/swanctl/swanctl.conf
+fi
 
 echo
-echo "Starting IPsec service..."
-mkdir -p /run/pluto /var/run/pluto
-rm -f /run/pluto/pluto.pid /var/run/pluto/pluto.pid
-if [ "$os_type" = "alpine" ]; then
-  sed -i '1c\#!/sbin/openrc-run' /etc/init.d/ipsec
-  rc-status >/dev/null 2>&1
-  rc-service ipsec zap >/dev/null
-  rc-service -D ipsec start >/dev/null 2>&1
-  mkdir -p /etc/crontabs
-  cron_cmd="rc-service -c -D ipsec zap start"
-if ! grep -qs "$cron_cmd" /etc/crontabs/root; then
-cat >> /etc/crontabs/root <<EOF
-* * * * * $cron_cmd
-* * * * * sleep 15; $cron_cmd
-* * * * * sleep 30; $cron_cmd
-* * * * * sleep 45; $cron_cmd
+echo "Starting strongSwan ($os_type/$os_arch)..."
+modprobe -q xfrm_user 2>/dev/null || true
+modprobe -q esp4 2>/dev/null || true
+modprobe -q ah4 2>/dev/null || true
+if [ -f /etc/strongswan.d/charon/resolve.conf ]; then
+  printf '%s\n' 'resolve {' '    load = no' '}' > /etc/strongswan.d/charon/resolve.conf
+fi
+for plug in eap-mschapv2 eap-identity xauth-generic; do
+  plug_conf="/etc/strongswan.d/charon/${plug}.conf"
+  if [ -f "$plug_conf" ]; then
+    sed -i 's/load = no/load = yes/' "$plug_conf"
+  fi
+done
+if [ "$sha2_truncbug" = yes ] && [ -f /etc/strongswan.d/charon/kernel-netlink.conf ]; then
+  if grep -q 'sha256_96' /etc/strongswan.d/charon/kernel-netlink.conf; then
+    sed -i 's/sha256_96 = no/sha256_96 = yes/' /etc/strongswan.d/charon/kernel-netlink.conf
+  else
+    sed -i '/kernel-netlink {/a\    sha256_96 = yes' /etc/strongswan.d/charon/kernel-netlink.conf
+  fi
+fi
+if [ ! -f /etc/strongswan.conf ] || ! grep -q 'strongswan\.d/\*\.conf' /etc/strongswan.conf; then
+  cat > /etc/strongswan.conf <<'EOF'
+charon {
+    load_modular = yes
+    plugins {
+        include strongswan.d/charon/*.conf
+    }
+}
+include strongswan.d/*.conf
 EOF
 fi
-  /usr/sbin/crond -L /dev/null
-else
-  service ipsec start >/dev/null 2>&1
-fi
+cat > /etc/strongswan.d/charon-logging.conf <<'EOF'
+charon {
+    install_virtual_ip = yes
+    install_routes = yes
+    make_before_break = yes
+    filelog {
+        stdout {
+            default = 1
+            ike = 1
+            knl = 1
+            cfg = 2
+            net = 1
+            ike_name = yes
+            append = yes
+            flush_line = yes
+        }
+    }
+}
+EOF
+
+charon_bin=
+for c in /usr/lib/strongswan/charon /usr/lib/ipsec/charon /usr/libexec/ipsec/charon /usr/sbin/charon; do
+  if [ -x "$c" ]; then
+    charon_bin=$c
+    break
+  fi
+done
+[ -n "$charon_bin" ] || exiterr "strongSwan charon was not found."
+rm -f /var/run/charon.vici /run/charon.vici
+nohup "$charon_bin" >/proc/1/fd/1 2>&1 &
+charon_pid=$!
+echo "$charon_pid" > /var/run/charon.pid
+disown "$charon_pid" 2>/dev/null || true
+vici_ready=0
+for _ in $(seq 1 50); do
+  if [ -S /var/run/charon.vici ] || [ -S /run/charon.vici ]; then
+    vici_ready=1
+    break
+  fi
+  if ! kill -0 "$charon_pid" 2>/dev/null; then
+    exiterr "strongSwan charon exited during startup. The kernel may be missing IPsec (xfrm) support."
+  fi
+  sleep 0.1
+done
+[ "$vici_ready" = 1 ] || exiterr "Timed out waiting for the strongSwan vici socket."
+swanctl --load-all || exiterr "swanctl --load-all failed."
+export charon_bin
+(
+  while true; do
+    sleep 20
+    if [ ! -S /var/run/charon.vici ] && [ ! -S /run/charon.vici ]; then
+      echo "strongSwan charon is down; restarting..." >&2
+      nohup "$charon_bin" >/proc/1/fd/1 2>&1 &
+      echo $! > /var/run/charon.pid
+      waited=0
+      while [ "$waited" -lt 50 ]; do
+        if [ -S /var/run/charon.vici ] || [ -S /run/charon.vici ]; then
+          swanctl --load-all >&2 || true
+          break
+        fi
+        waited=$((waited + 1))
+        sleep 0.1
+      done
+    fi
+  done
+) >/proc/1/fd/1 2>&1 &
+disown $! 2>/dev/null || true
 
 if [ -n "$VPN_DNS_NAME" ]; then
   server_text="Server"
@@ -748,87 +1205,36 @@ VPN client setup: https://vpnsetup.net/clients2
 EOF
 fi
 
-# Set up IKEv2
-status=0
-ikev2_sh="/opt/src/ikev2.sh"
-ikev2_conf="/etc/ipsec.d/ikev2.conf"
-ikev2_log="/etc/ipsec.d/ikev2setup.log"
-if grep -q " /etc/ipsec.d " /proc/mounts && [ -s "$ikev2_sh" ] && [ ! -f "$ikev2_conf" ]; then
-  echo
-  echo "Setting up IKEv2. This may take a few moments..."
-  if [ -n "$VPN_SPLIT_IKEV2" ]; then
-    sed -i "s|^  leftsubnet=\\\$lsubnet$|  leftsubnet=$VPN_SPLIT_IKEV2|g" "$ikev2_sh"
+if [ "$ikev2_enabled" = yes ]; then
+  if ! swanctl --list-conns 2>/dev/null | grep -q 'ikev2-eap'; then
+    echo "Warning: IKEv2 EAP-MSCHAPv2 connection was not loaded." >&2
   fi
-  if VPN_DNS_NAME="$VPN_DNS_NAME" VPN_PUBLIC_IP="$public_ip" \
-    VPN_CLIENT_NAME="$VPN_CLIENT_NAME" VPN_XAUTH_POOL="$VPN_XAUTH_POOL" \
-    VPN_DNS_SRV1="$VPN_DNS_SRV1" VPN_DNS_SRV2="$VPN_DNS_SRV2" \
-    VPN_PROTECT_CONFIG="$VPN_PROTECT_CONFIG" \
-    VPN_CLIENT_VALIDITY="$VPN_CLIENT_VALIDITY" \
-    VPN_PUBLIC_IP6="$ip6" \
-    /bin/bash "$ikev2_sh" --auto >"$ikev2_log" 2>&1; then
-    status=1
-    status_text="IKEv2 setup successful."
-  else
-    status=4
-    rm -f "$ikev2_conf"
-    echo "IKEv2 setup failed."
-  fi
-  chmod 600 "$ikev2_log"
-fi
-if [ "$status" = 0 ] && [ -f "$ikev2_conf" ] && [ -s "$ikev2_log" ]; then
-  status=2
-  status_text="IKEv2 is already set up."
-fi
-if [ "$status" = 1 ] || [ "$status" = 2 ]; then
 cat <<EOF
 
 ================================================
 
-$status_text Details for IKEv2 mode:
+IKEv2 EAP-MSCHAPv2 is ready.
 
-EOF
-  sed -n '/VPN server address:/,/Next steps:/p' "$ikev2_log"
-cat <<'EOF'
-https://vpnsetup.net/clients2
+$server_text: $server_addr
+Username: $VPN_USER
+Password: $VPN_PASSWORD
+Client address pool: $IKEV2_POOL
+CA certificate: /etc/ipsec.d/ca.crt
+Apple profile: /etc/ipsec.d/$(printf '%s' "$VPN_USER" | tr -c 'A-Za-z0-9_.-' '_').mobileconfig
+
+Install the CA on each client, then connect with IKEv2 and
+EAP-MSCHAPv2 (username/password). The server address must match
+the certificate identity above.
+
+Windows: VPN type IKEv2, authentication "Microsoft: Secured password (EAP-MSCHAP v2)".
+Android 11+: IKEv2/IPSec MSCHAPv2.
+iOS/macOS: install the .mobileconfig profile, then enable full trust for the CA.
+
+List users: docker exec <container> ikev2.sh --listclients
 
 ================================================
 
 EOF
-else
-  echo
-fi
-
-if [ "$status" = 2 ] && [ -n "$VPN_DNS_NAME" ]; then
-  server_addr_cur=$(grep -s "leftcert=" /etc/ipsec.d/ikev2.conf | cut -f2 -d= | head -n 1)
-  if [ "$VPN_DNS_NAME" != "$server_addr_cur" ]; then
-cat <<'EOF'
-Warning: The VPN_DNS_NAME variable you specified has no effect
-         for IKEv2 mode, because IKEv2 is already set up in this
-         container. To change the IKEv2 server address, see:
-         https://vpnsetup.net/ikev2docker
-
-EOF
-  fi
-fi
-
-# Check for new Libreswan version
-ts_file="/opt/src/swanver"
-if [ ! -f "$ts_file" ] || [ "$(find "$ts_file" -mmin +10080)" ]; then
-  touch "$ts_file"
-  ipsec_ver=$(ipsec --version 2>/dev/null)
-  swan_ver=$(printf '%s' "$ipsec_ver" | sed -e 's/.*Libreswan U\?//' -e 's/\( (\|\/K\).*//')
-  base_url="https://github.com/hwdsl2/vpn-extras/releases/download/v1.0.0"
-  swan_ver_url="$base_url/upg-docker-$os_type-$os_arch-swanver"
-  swan_ver_latest=$(wget -t 2 -T 10 -qO- "$swan_ver_url" | head -n 1)
-  if printf '%s' "$swan_ver_latest" | grep -Eq '^([3-9]|[1-9][0-9]{1,2})(\.([0-9]|[1-9][0-9]{1,2})){1,2}$' \
-    && [ -n "$swan_ver" ] && [ "$swan_ver" != "$swan_ver_latest" ] \
-    && printf '%s\n%s' "$swan_ver" "$swan_ver_latest" | sort -C -V; then
-cat <<EOF
-Note: A newer version of Libreswan ($swan_ver_latest) is available.
-To update this Docker image, see: https://vpnsetup.net/dockerupdate
-
-EOF
-  fi
 fi
 
 # Start xl2tpd
