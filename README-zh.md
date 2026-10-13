@@ -6,14 +6,15 @@
 
 使用这个 Docker 镜像快速搭建 IPsec VPN 服务器。支持 IPsec/L2TP，Cisco IPsec 和 IKEv2 协议。
 
-本镜像以 Alpine 3.23 或 Debian 12 为基础，并使用 [strongSwan](https://www.strongswan.org) (IPsec VPN 软件) 和 [xl2tpd](https://github.com/xelerance/xl2tpd) (L2TP 服务进程)。这是 [hwdsl2/docker-ipsec-vpn-server](https://github.com/hwdsl2/docker-ipsec-vpn-server) 的衍生版本：IPsec 守护进程由 Libreswan 换成 strongSwan，并增加 IKEv2 EAP-MSCHAPv2（用户名/密码）支持。
+本镜像以 Alpine 3.23 或 Debian 12 为基础，并使用 [strongSwan](https://www.strongswan.org) (IPsec VPN 软件) 和 [xl2tpd](https://github.com/xelerance/xl2tpd) (L2TP 服务进程)。这是 [hwdsl2/docker-ipsec-vpn-server](https://github.com/hwdsl2/docker-ipsec-vpn-server) 的衍生版本：IPsec 守护进程由 Libreswan 换成 strongSwan。原有的 IPsec/L2TP、IPsec/XAuth 和 IKEv2 单证书模式保持不变，并增加 IKEv2 EAP-MSCHAPv2（用户名/密码）。
 
 IPsec VPN 可以加密你的网络流量，以防止在通过因特网传送时，你和 VPN 服务器之间的任何人对你的数据的未经授权的访问。在使用不安全的网络时，这是特别有用的，例如在咖啡厅，机场或旅馆房间。
 
 **功能特性：**
 
-- 首次启动时自动生成 VPN 凭证、CA 和服务端证书
-- IKEv2 使用 EAP-MSCHAPv2：服务端证书认证，客户端用户名和密码认证
+- 首次启动时自动生成 VPN 凭证、CA、服务端证书和 IKEv2 客户端证书
+- IKEv2 单证书模式会生成与原项目一致的 `.p12`、`.sswan` 和 `.mobileconfig`
+- 新增 IKEv2 EAP-MSCHAPv2：服务端证书认证，客户端用户名和密码认证
 - 支持具有强大和快速加密算法（例如 AES-GCM）的 IKEv2 模式
 - 生成 Apple 描述文件，便于配置 iOS 和 macOS
 - 支持 Windows, macOS, iOS, Android, Chrome OS 和 Linux 客户端
@@ -96,6 +97,7 @@ docker image tag quay.io/hwdsl2/ipsec-vpn-server hwdsl2/ipsec-vpn-server
 | IPsec 软件        | strongSwan               | strongSwan                     |
 | IPsec/L2TP      | ✅                       | ✅                              |
 | Cisco IPsec     | ✅                       | ✅                              |
+| IKEv2 单证书        | ✅                       | ✅                              |
 | IKEv2 EAP-MSCHAPv2 | ✅                    | ✅                              |
 
 **注：** 要使用基于 Debian 的镜像，请将本自述文件中所有的 `hwdsl2/ipsec-vpn-server` 替换为 `hwdsl2/ipsec-vpn-server:debian`。这些镜像当前与 Synology NAS 系统不兼容。
@@ -131,7 +133,7 @@ VPN_ADDL_USERS=additional_username_1 additional_username_2
 VPN_ADDL_PASSWORDS=additional_password_1 additional_password_2
 ```
 
-同一组用户名和密码用于 IPsec/L2TP、IPsec/XAuth ("Cisco IPsec") 和 IKEv2 EAP-MSCHAPv2。IPsec PSK 只用于前两种模式。IKEv2 的客户端配置见[配置并使用 IKEv2 VPN](#配置并使用-ikev2-vpn)。
+同一组用户名和密码用于 IPsec/L2TP、IPsec/XAuth ("Cisco IPsec") 和 IKEv2 EAP-MSCHAPv2。IPsec PSK 只用于前两种模式。IKEv2 单证书模式使用客户端证书，不使用这组用户名和密码。客户端配置见[配置并使用 IKEv2 VPN](#配置并使用-ikev2-vpn)。
 
 > [!IMPORTANT]
 > 在 `env` 文件中填写值时，不要在值外添加引号，也不要在 `=` 两侧添加空格。值中不能包含 `\`、`"` 或 `'`。一个安全的 IPsec PSK 应该至少包含 20 个随机字符。
@@ -305,9 +307,12 @@ Status: Image is up to date for hwdsl2/ipsec-vpn-server:latest
 
 ## 配置并使用 IKEv2 VPN
 
-IKEv2 使用 EAP-MSCHAPv2。服务端用证书证明自己的身份，客户端用 `VPN_USER` / `VPN_PASSWORD`（以及 `VPN_ADDL_USERS` 中的额外用户）登录。不需要为每个设备签发客户端证书，也不需要 IPsec PSK。
+容器必须把 Docker 卷挂载到 `/etc/ipsec.d`。首次启动会生成 CA、服务端证书，以及名为 `vpnclient`（或 `VPN_CLIENT_NAME`）的 IKEv2 客户端证书。服务端地址来自公网 IP，或者来自 `VPN_DNS_NAME`。客户端填写的服务器地址必须和证书身份一致。
 
-容器必须把 Docker 卷挂载到 `/etc/ipsec.d`，CA 和服务端证书才会被保存。首次启动会生成这些文件。服务端地址来自公网 IP，或者来自 `VPN_DNS_NAME`。客户端填写的服务器地址必须和证书身份一致。
+支持两种 IKEv2 模式，可以同时使用：
+
+- **单证书：** 与原项目相同。每个客户端有自己的证书。地址池与 Cisco IPsec 相同（默认 `192.168.43.10-192.168.43.250`）。
+- **EAP-MSCHAPv2：** 服务端出示证书，客户端使用 `VPN_USER` / `VPN_PASSWORD`（以及 `VPN_ADDL_USERS`）。地址池默认 `192.168.44.10-192.168.44.250`。不使用 IPsec PSK。
 
 查看容器日志：
 
@@ -315,22 +320,36 @@ IKEv2 使用 EAP-MSCHAPv2。服务端用证书证明自己的身份，客户端�
 docker logs ipsec-vpn-server
 ```
 
-把 CA 和 Apple 描述文件复制到 Docker 主机：
+日志里会打印 VPN 用户名和密码，以及单证书配置文件的路径。只有设置了 `VPN_PROTECT_CONFIG=yes` 时，才会额外打印 `.p12` 导入密码。证书私钥和 charon 调试信息不会写入这条日志。
+
+复制单证书客户端配置：
 
 ```bash
-docker cp ipsec-vpn-server:/etc/ipsec.d/ca.crt ./
-docker cp ipsec-vpn-server:/etc/ipsec.d/vpnuser.mobileconfig ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/vpnclient.p12 ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/vpnclient.sswan ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/vpnclient.mobileconfig ./
 docker exec -it ipsec-vpn-server ikev2.sh --listclients
+docker exec -it ipsec-vpn-server ikev2.sh --addclient myphone
 ```
+
+`.p12` 内含客户端证书、私钥和 CA。默认导入密码为空。`.sswan` 的类型是 `ikev2-cert`。`.mobileconfig` 使用证书认证。添加、导出、吊销或删除客户端的命令与原项目一致：`--addclient`、`--exportclient`、`--listclients`、`--revokeclient`、`--deleteclient`、`--removeikev2`。
+
+EAP-MSCHAPv2 的配置文件按用户名分开存放，避免覆盖单证书文件：
+
+```bash
+docker cp ipsec-vpn-server:/etc/ipsec.d/eap-vpnuser.p12 ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/eap-vpnuser.sswan ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/eap-vpnuser.mobileconfig ./
+```
+
+`eap-<用户名>.p12` 里是 CA 证书，用来信任服务器，不是客户端证书。默认导入密码为空；`VPN_PROTECT_CONFIG=yes` 时与单证书配置使用同一个导入密码，并且只在日志里打印一次。
 
 客户端设置：
 
-- **Windows：** 把 `ca.crt` 导入“受信任的根证书颁发机构”。新建 VPN，类型选 IKEv2，身份验证选 “Microsoft: 安全密码 (EAP-MSCHAP v2)”。
-- **Android 11 及以上：** 安装 CA 后，VPN 类型选 IKEv2/IPSec MSCHAPv2，填服务器地址、用户名和密码。
-- **iOS / macOS：** 安装 `.mobileconfig`。若系统仍提示不受信任，到证书信任设置里为该 CA 启用完全信任。
-- **strongSwan 客户端：** 网关认证用证书/CA，客户端认证用 EAP-MSCHAPv2。
+- **单证书：** Windows 和 Linux 导入 `.p12`；Android 用 strongSwan 客户端导入 `.sswan`；iOS / macOS 安装 `.mobileconfig`。
+- **EAP-MSCHAPv2：** Windows 导入 `eap-<用户名>.p12` 后，IKEv2 身份验证选 “Microsoft: 安全密码 (EAP-MSCHAP v2)”。Android 导入 `eap-<用户名>.sswan`，或在 Android 11 及以上使用系统 IKEv2/IPSec MSCHAPv2。iOS / macOS 安装 `eap-<用户名>.mobileconfig`。
 
-用户在 `env` 文件里管理。修改用户后删除并重新创建容器，继续使用同一个 `ikev2-vpn-data` 卷，已安装的 CA 可以保持不变。更换 `VPN_DNS_NAME` 或服务器 IP 时，启动脚本会用原来的 CA 重新签发服务端证书。
+修改用户后删除并重新创建容器，继续使用同一个卷，已安装的 CA 可以保持不变。更换 `VPN_DNS_NAME` 或服务器 IP 时，启动脚本会用原来的 CA 重新签发服务端证书，并更新已有客户端配置里的服务器地址。
 
 要彻底更换 CA，先记下登录信息，再执行 `docker rm -f ipsec-vpn-server` 和 `docker volume rm ikev2-vpn-data`，然后重新创建容器。
 
@@ -364,6 +383,7 @@ docker exec -it ipsec-vpn-server ikev2.sh --listclients
 
 * IPsec/L2TP with PSK
 * IKEv1 with PSK and XAuth ("Cisco IPsec")
+* IKEv2 with a client certificate
 * IKEv2 with EAP-MSCHAPv2
 
 所需端口：`500/udp` 和 `4500/udp`（IPsec）

@@ -6,14 +6,15 @@
 
 Docker image to run an IPsec VPN server, with IPsec/L2TP, Cisco IPsec and IKEv2.
 
-Based on Alpine 3.23 or Debian 12 with [strongSwan](https://www.strongswan.org) (IPsec VPN software) and [xl2tpd](https://github.com/xelerance/xl2tpd) (L2TP daemon). This tree is a derivative of [hwdsl2/docker-ipsec-vpn-server](https://github.com/hwdsl2/docker-ipsec-vpn-server): Libreswan is replaced by strongSwan, and IKEv2 EAP-MSCHAPv2 (username/password) is added.
+Based on Alpine 3.23 or Debian 12 with [strongSwan](https://www.strongswan.org) (IPsec VPN software) and [xl2tpd](https://github.com/xelerance/xl2tpd) (L2TP daemon). This tree is a derivative of [hwdsl2/docker-ipsec-vpn-server](https://github.com/hwdsl2/docker-ipsec-vpn-server): Libreswan is replaced by strongSwan. IPsec/L2TP, IPsec/XAuth, and IKEv2 certificate mode stay in place, and IKEv2 EAP-MSCHAPv2 (username/password) is added.
 
 An IPsec VPN encrypts your network traffic, so that nobody between you and the VPN server can eavesdrop on your data as it travels via the Internet. This is especially useful when using unsecured networks, e.g. at coffee shops, airports or hotel rooms.
 
 **Features:**
 
-- Automatically generates VPN credentials, a CA, and a server certificate on first start
-- IKEv2 uses EAP-MSCHAPv2: the server authenticates with a certificate, the client with a username and password
+- Automatically generates VPN credentials, a CA, a server certificate, and an IKEv2 client certificate on first start
+- IKEv2 certificate mode writes the same `.p12`, `.sswan`, and `.mobileconfig` files as the original project
+- Adds IKEv2 EAP-MSCHAPv2: the server authenticates with a certificate, the client with a username and password
 - Supports IKEv2 with strong and fast ciphers (e.g. AES-GCM)
 - Generates an Apple profile for iOS and macOS
 - Supports Windows, macOS, iOS, Android, Chrome OS and Linux as VPN clients
@@ -96,7 +97,8 @@ Two pre-built images are available. The default Alpine-based image is only ~19 M
 | IPsec software    | strongSwan               | strongSwan                     |
 | IPsec/L2TP        | ✅                       | ✅                              |
 | Cisco IPsec       | ✅                       | ✅                              |
-| IKEv2             | ✅                       | ✅                              |
+| IKEv2 certificate | ✅                       | ✅                              |
+| IKEv2 EAP-MSCHAPv2 | ✅                      | ✅                              |
 
 **Note:** To use the Debian-based image, replace every `hwdsl2/ipsec-vpn-server` with `hwdsl2/ipsec-vpn-server:debian` in this README. These images are not currently compatible with Synology NAS systems.
 
@@ -131,7 +133,7 @@ VPN_ADDL_USERS=additional_username_1 additional_username_2
 VPN_ADDL_PASSWORDS=additional_password_1 additional_password_2
 ```
 
-The same username and password are used for IPsec/L2TP, IPsec/XAuth ("Cisco IPsec"), and IKEv2 EAP-MSCHAPv2. The IPsec PSK is used only by the first two modes. For IKEv2 client setup, see [Configure and use IKEv2 VPN](#configure-and-use-ikev2-vpn).
+The same username and password are used for IPsec/L2TP, IPsec/XAuth ("Cisco IPsec"), and IKEv2 EAP-MSCHAPv2. The IPsec PSK is used only by the first two modes. IKEv2 certificate mode uses a client certificate instead of this username and password. For IKEv2 client setup, see [Configure and use IKEv2 VPN](#configure-and-use-ikev2-vpn).
 
 > [!IMPORTANT]
 > In your `env` file, write values without surrounding quotes or spaces around `=`. Values must not contain `\`, `"`, or `'`. A secure IPsec PSK should consist of at least 20 random characters.
@@ -305,9 +307,12 @@ Otherwise, it will download the latest version. To update your Docker container,
 
 ## Configure and use IKEv2 VPN
 
-IKEv2 uses EAP-MSCHAPv2. The server authenticates with a certificate, and the client logs in with `VPN_USER` / `VPN_PASSWORD` (plus any `VPN_ADDL_USERS`). Each device does not need its own client certificate, and this mode does not use the IPsec PSK.
+Mount a Docker volume at `/etc/ipsec.d`. On first start the image creates a CA, a server certificate, and an IKEv2 client certificate named `vpnclient` (or `VPN_CLIENT_NAME`). The server identity is the public IP, or `VPN_DNS_NAME` when that is set. The address configured on the client must match that identity.
 
-Mount a Docker volume at `/etc/ipsec.d` so the CA and server certificate persist. They are created on first start. The server identity is the public IP, or `VPN_DNS_NAME` when that is set. The address configured on the client must match that identity.
+Two IKEv2 modes can be used at the same time:
+
+- **Certificate:** same client files as the original project. Each client has its own certificate. The address pool is the Cisco IPsec pool (default `192.168.43.10-192.168.43.250`).
+- **EAP-MSCHAPv2:** the server presents a certificate and the client uses `VPN_USER` / `VPN_PASSWORD` (plus any `VPN_ADDL_USERS`). The default pool is `192.168.44.10-192.168.44.250`. This mode does not use the IPsec PSK.
 
 View the container logs:
 
@@ -315,22 +320,36 @@ View the container logs:
 docker logs ipsec-vpn-server
 ```
 
-Copy the CA and the Apple profile to the Docker host:
+The log includes the VPN username and password, and the paths of the certificate-mode client files. The `.p12` import password is printed only when `VPN_PROTECT_CONFIG=yes`. Private keys and charon debug output are not written to this log.
+
+Copy the certificate-mode client files:
 
 ```bash
-docker cp ipsec-vpn-server:/etc/ipsec.d/ca.crt ./
-docker cp ipsec-vpn-server:/etc/ipsec.d/vpnuser.mobileconfig ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/vpnclient.p12 ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/vpnclient.sswan ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/vpnclient.mobileconfig ./
 docker exec -it ipsec-vpn-server ikev2.sh --listclients
+docker exec -it ipsec-vpn-server ikev2.sh --addclient myphone
 ```
+
+The `.p12` contains the client certificate, private key, and CA. The import password is empty unless `VPN_PROTECT_CONFIG=yes`. The `.sswan` type is `ikev2-cert`. The `.mobileconfig` uses certificate authentication. `--addclient`, `--exportclient`, `--listclients`, `--revokeclient`, `--deleteclient`, and `--removeikev2` match the original project.
+
+EAP-MSCHAPv2 profiles are named separately so they do not overwrite certificate-mode files:
+
+```bash
+docker cp ipsec-vpn-server:/etc/ipsec.d/eap-vpnuser.p12 ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/eap-vpnuser.sswan ./
+docker cp ipsec-vpn-server:/etc/ipsec.d/eap-vpnuser.mobileconfig ./
+```
+
+`eap-<user>.p12` contains the CA certificate used to trust the server, not a client certificate. The import password is empty unless `VPN_PROTECT_CONFIG=yes`, in which case it is the same password as the certificate-mode files and is printed once.
 
 Client setup:
 
-- **Windows:** import `ca.crt` into Trusted Root Certification Authorities. Create a VPN of type IKEv2 and choose "Microsoft: Secured password (EAP-MSCHAP v2)".
-- **Android 11+:** install the CA, then choose IKEv2/IPSec MSCHAPv2 and enter the server address, username, and password.
-- **iOS / macOS:** install the `.mobileconfig` profile. If the system still reports the certificate as untrusted, enable full trust for this CA.
-- **strongSwan clients:** authenticate the gateway with the CA, and authenticate the user with EAP-MSCHAPv2.
+- **Certificate:** import the `.p12` on Windows and Linux, the `.sswan` file in the strongSwan Android app, and the `.mobileconfig` on iOS or macOS.
+- **EAP-MSCHAPv2:** on Windows, import `eap-<user>.p12` and choose "Microsoft: Secured password (EAP-MSCHAP v2)". On Android, import `eap-<user>.sswan`, or use the system IKEv2/IPSec MSCHAPv2 client on Android 11+. On iOS or macOS, install `eap-<user>.mobileconfig`.
 
-Manage users in the env file. After changing users, remove and re-create the container while keeping the same `ikev2-vpn-data` volume, so clients that already trust the CA do not need a new CA. When `VPN_DNS_NAME` or the server IP changes, the startup script reissues the server certificate with the existing CA.
+After changing users, remove and re-create the container while keeping the same volume, so clients that already trust the CA do not need a new CA. When `VPN_DNS_NAME` or the server IP changes, the startup script reissues the server certificate with the existing CA and refreshes the server address in existing client files.
 
 To replace the CA entirely, note the login details, then run `docker rm -f ipsec-vpn-server` and `docker volume rm ikev2-vpn-data` before creating the container again.
 
@@ -364,6 +383,7 @@ The default IPsec configuration supports:
 
 * IPsec/L2TP with PSK
 * IKEv1 with PSK and XAuth ("Cisco IPsec")
+* IKEv2 with a client certificate
 * IKEv2 with EAP-MSCHAPv2
 
 Ports required: `500/udp` and `4500/udp` (IPsec)

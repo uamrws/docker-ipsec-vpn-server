@@ -75,7 +75,7 @@ write_mobileconfig() {
   uuid_root=$(new_uuid)
   uuid_ca=$(new_uuid)
   uuid_vpn=$(new_uuid)
-  display=${VPN_CLIENT_NAME:-IKEv2 VPN}
+  display="IKEv2 VPN"
   {
     printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
     printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
@@ -173,6 +173,74 @@ write_mobileconfig() {
     printf '%s\n' '  </array>'
     printf '%s\n' '</dict>'
     printf '%s\n' '</plist>'
+  } > "$outfile"
+  chmod 600 "$outfile"
+}
+
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+profile_uuid() {
+  local user=$1 store=/etc/ipsec.d/profile-uuids found
+  found=$(awk -F '\t' -v u="$user" '$1 == u { print $2; exit }' "$store" 2>/dev/null || true)
+  if [ -z "$found" ]; then
+    found=$(new_uuid)
+    printf '%s\t%s\n' "$user" "$found" >> "$store"
+    chmod 600 "$store"
+  fi
+  printf '%s\n' "$found"
+}
+
+write_eap_p12() {
+  local outfile=$1
+  local pass=${2-}
+  if ! openssl pkcs12 -export -nokeys \
+      -certpbe PBE-SHA1-3DES -legacy \
+      -in "$CA_CRT" \
+      -name "IKEv2 VPN CA" \
+      -out "$outfile" \
+      -passout "pass:${pass}" >/dev/null 2>&1; then
+    openssl pkcs12 -export -nokeys \
+      -in "$CA_CRT" \
+      -name "IKEv2 VPN CA" \
+      -out "$outfile" \
+      -passout "pass:${pass}" >/dev/null 2>&1 \
+      || exiterr "Failed to export the EAP PKCS#12 file."
+  fi
+  chmod 600 "$outfile"
+}
+
+write_sswan() {
+  local user=$1 outfile=$2 profile_name=$3
+  local uuid cert_b64 dns_json split_json
+  uuid=$(profile_uuid "$user")
+  cert_b64=$(openssl x509 -in "$CA_CRT" -outform der | openssl base64 -A)
+  [ -n "$cert_b64" ] || exiterr "Failed to encode the CA certificate for the strongSwan profile."
+  dns_json=$(printf '"%s"' "$(json_escape "$DNS_SRV1")")
+  if [ -z "$VPN_DNS_SRV1" ] || [ -n "$VPN_DNS_SRV2" ]; then
+    dns_json=$(printf '%s, "%s"' "$dns_json" "$(json_escape "$DNS_SRV2")")
+  fi
+  split_json=""
+  if [ -n "$VPN_SPLIT_IKEV2" ]; then
+    split_json=$(printf ',\n  "split-tunneling": {\n    "subnets": ["%s"]\n  }' "$(json_escape "$VPN_SPLIT_IKEV2")")
+  fi
+  {
+    printf '%s\n' '{'
+    printf '  "uuid": "%s",\n' "$(json_escape "$uuid")"
+    printf '  "name": "%s",\n' "$(json_escape "$profile_name")"
+    printf '%s\n' '  "type": "ikev2-eap",'
+    printf '%s\n' '  "remote": {'
+    printf '    "addr": "%s",\n' "$(json_escape "$server_addr")"
+    printf '    "id": "%s",\n' "$(json_escape "$server_addr")"
+    printf '    "cert": "%s"\n' "$cert_b64"
+    printf '%s\n' '  },'
+    printf '%s\n' '  "local": {'
+    printf '    "eap_id": "%s"\n' "$(json_escape "$user")"
+    printf '%s\n' '  },'
+    printf '  "dns-servers": [%s]' "$dns_json"
+    printf '%s\n' "$split_json"
+    printf '%s\n' '}'
   } > "$outfile"
   chmod 600 "$outfile"
 }
@@ -618,18 +686,20 @@ if [ -n "$ip6" ]; then
   ikev2_addrs="$IKEV2_POOL, ${ip6_base}10-${ip6_base}fe"
 fi
 
-ikev2_enabled=no
+ikev2_volume=no
+eap_enabled=no
 mkdir -p /etc/ipsec.d
 if grep -q " /etc/ipsec.d " /proc/mounts; then
+  ikev2_volume=yes
   if have_plugin eap-mschapv2 && have_plugin eap-identity; then
-    ikev2_enabled=yes
+    eap_enabled=yes
   else
-    echo "Warning: strongSwan EAP-MSCHAPv2 plugins are missing. IKEv2 is disabled." >&2
+    echo "Warning: strongSwan EAP-MSCHAPv2 plugins are missing. IKEv2 EAP-MSCHAPv2 is disabled." >&2
   fi
 else
   echo
-  echo "Warning: /etc/ipsec.d is not a mounted volume, so IKEv2 EAP-MSCHAPv2 is not enabled."
-  echo "         Mount a Docker volume at /etc/ipsec.d to keep the CA and server certificate."
+  echo "Warning: /etc/ipsec.d is not a mounted volume, so IKEv2 is not enabled."
+  echo "         Mount a Docker volume at /etc/ipsec.d to keep certificates and client config."
 fi
 if [ "$disable_ipsec_xauth" != yes ] && ! have_plugin xauth-generic; then
   echo "Warning: strongSwan xauth-generic plugin is missing. Cisco IPsec is disabled." >&2
@@ -663,7 +733,17 @@ case $VPN_PROTECT_CONFIG in
   [yY][eE][sS]) include_eap_pass=no ;;
 esac
 
-if [ "$ikev2_enabled" = yes ]; then
+cert_pool_name=xauth
+if [ "$disable_ipsec_xauth" = yes ]; then
+  cert_pool_name=ikev2cert
+fi
+cert_pool_addrs=$XAUTH_POOL
+if [ -n "$ip6" ]; then
+  ip6_prefix=$(printf '%s' "$IP6_NET" | sed 's|/[0-9]*$||; s|::$||')
+  cert_pool_addrs="$XAUTH_POOL, ${ip6_prefix}::1000-${ip6_prefix}::1fff"
+fi
+
+if [ "$ikev2_volume" = yes ]; then
   if [ ! -s "$CA_KEY" ] || [ ! -s "$CA_CRT" ]; then
     echo
     echo "Generating IKEv2 CA certificate..."
@@ -672,6 +752,7 @@ if [ "$ikev2_enabled" = yes ]; then
       -subj "/CN=IKEv2 VPN CA" \
       -addext basicConstraints=critical,CA:TRUE \
       -addext keyUsage=critical,keyCertSign,cRLSign \
+      >/dev/null 2>&1 \
       || exiterr "Failed to generate the IKEv2 CA certificate."
   fi
   if [ ! -s "$SRV_KEY" ] || [ ! -s "$SRV_CRT" ] || [ "$(cat "$ID_FILE" 2>/dev/null || true)" != "$server_addr" ]; then
@@ -682,6 +763,7 @@ if [ "$ikev2_enabled" = yes ]; then
     fi
     openssl req -newkey rsa:3072 -nodes -keyout "$SRV_KEY" -out "$SRV_CSR" \
       -subj "/CN=${server_addr}" \
+      >/dev/null 2>&1 \
       || exiterr "Failed to generate the IKEv2 server key."
     openssl x509 -req -in "$SRV_CSR" -CA "$CA_CRT" -CAkey "$CA_KEY" \
       -CAserial "$CA_SRL" -CAcreateserial \
@@ -691,6 +773,7 @@ if [ "$ikev2_enabled" = yes ]; then
         'keyUsage=digitalSignature,keyEncipherment' \
         'extendedKeyUsage=serverAuth,1.3.6.1.5.5.8.2.2' \
         "subjectAltName=${san}") \
+      >/dev/null 2>&1 \
       || exiterr "Failed to sign the IKEv2 server certificate."
     rm -f "$SRV_CSR"
     printf '%s\n' "$server_addr" > "$ID_FILE"
@@ -774,7 +857,43 @@ EOF
     }
 EOF
   fi
-  if [ "$ikev2_enabled" = yes ]; then
+  if [ "$ikev2_volume" = yes ]; then
+    cat <<EOF
+    ikev2-cert {
+        version = 2
+        local_addrs = %any
+        remote_addrs = %any
+        proposals = $ikev2_proposals
+        rekey_time = 0s
+        encap = yes
+        fragmentation = yes
+        dpd_delay = 30s
+        dpd_timeout = 300s
+        unique = never
+        send_cert = always
+        send_certreq = yes
+        pools = $cert_pool_name
+        local {
+            auth = pubkey
+            certs = server.crt
+            id = "$server_addr"
+        }
+        remote {
+            auth = pubkey
+            id = %any
+        }
+        children {
+            ikev2-cert {
+                local_ts = $ikev2_ts
+                esp_proposals = $ikev2_esp
+                rekey_time = 0s
+                dpd_action = none
+            }
+        }
+    }
+EOF
+  fi
+  if [ "$eap_enabled" = yes ]; then
     cat <<EOF
     ikev2-eap {
         version = 2
@@ -814,14 +933,26 @@ EOF
   printf '%s\n' ''
   printf '%s\n' 'pools {'
   if [ "$disable_ipsec_xauth" != yes ]; then
+    xauth_pool_addrs=$XAUTH_POOL
+    if [ "$ikev2_volume" = yes ] && [ -n "$ip6" ]; then
+      xauth_pool_addrs=$cert_pool_addrs
+    fi
     cat <<EOF
     xauth {
-        addrs = $XAUTH_POOL
+        addrs = $xauth_pool_addrs
         dns = $dns_list
     }
 EOF
   fi
-  if [ "$ikev2_enabled" = yes ]; then
+  if [ "$ikev2_volume" = yes ] && [ "$disable_ipsec_xauth" = yes ]; then
+    cat <<EOF
+    ikev2cert {
+        addrs = $cert_pool_addrs
+        dns = $dns_list
+    }
+EOF
+  fi
+  if [ "$eap_enabled" = yes ]; then
     cat <<EOF
     ikev2 {
         addrs = $ikev2_addrs
@@ -835,7 +966,7 @@ EOF
   if [ "$disable_ipsec_l2tp" != yes ] || [ "$disable_ipsec_xauth" != yes ]; then
     printf '    ike-psk {\n        secret = "%s"\n    }\n' "$VPN_IPSEC_PSK"
   fi
-  if [ "$ikev2_enabled" = yes ]; then
+  if [ "$ikev2_volume" = yes ]; then
     printf '%s\n' '    private-server {' '        file = server.key' '    }'
   fi
   secret_index=0
@@ -845,7 +976,7 @@ EOF
       printf '    xauth-%s {\n        id = "%s"\n        secret = "%s"\n    }\n' \
         "$secret_index" "$1" "$2"
     fi
-    if [ "$ikev2_enabled" = yes ]; then
+    if [ "$eap_enabled" = yes ]; then
       printf '    eap-%s {\n        id = "%s"\n        secret = "%s"\n    }\n' \
         "$secret_index" "$1" "$2"
     fi
@@ -866,19 +997,38 @@ EOF
 } > /etc/swanctl/swanctl.conf
 chmod 600 /etc/swanctl/swanctl.conf
 
-if [ "$ikev2_enabled" = yes ]; then
+eap_p12_pass=""
+if [ "$eap_enabled" = yes ]; then
+  if [ "$include_eap_pass" = no ]; then
+    p12_pass_file=/etc/ipsec.d/.config-password
+    if [ -s "$p12_pass_file" ]; then
+      eap_p12_pass=$(cat "$p12_pass_file")
+    elif [ -f /etc/ipsec.d/ikev2.conf ]; then
+      eap_p12_pass=$(sed -n "s/^IKEV2_CONFIG_PASSWORD='\\(.*\\)'/\\1/p" /etc/ipsec.d/ikev2.conf | tail -n 1)
+    fi
+    if [ -z "$eap_p12_pass" ]; then
+      eap_p12_pass=$(LC_CTYPE=C tr -dc 'A-HJ-NPR-Za-km-z2-9' </dev/urandom | head -c 18 || true)
+    fi
+    [ -n "$eap_p12_pass" ] || exiterr "Could not generate a password for the EAP PKCS#12 file."
+    printf '%s\n' "$eap_p12_pass" > "$p12_pass_file"
+    chmod 600 "$p12_pass_file"
+  fi
+  write_user_profiles() {
+    local user=$1 pass=$2 safe
+    safe=$(printf '%s' "$user" | tr -c 'A-Za-z0-9_.-' '_')
+    printf '%s\n' "$user" >> /etc/ipsec.d/eap-users
+    write_eap_p12 "/etc/ipsec.d/eap-${safe}.p12" "$eap_p12_pass"
+    write_mobileconfig "$user" "$pass" "/etc/ipsec.d/eap-${safe}.mobileconfig" "$include_eap_pass"
+    write_sswan "$user" "/etc/ipsec.d/eap-${safe}.sswan" "$user"
+  }
   : > /etc/ipsec.d/eap-users
-  printf '%s\n' "$VPN_USER" >> /etc/ipsec.d/eap-users
-  safe_user=$(printf '%s' "$VPN_USER" | tr -c 'A-Za-z0-9_.-' '_')
-  write_mobileconfig "$VPN_USER" "$VPN_PASSWORD" "/etc/ipsec.d/${safe_user}.mobileconfig" "$include_eap_pass"
+  write_user_profiles "$VPN_USER" "$VPN_PASSWORD"
   if [ -n "$VPN_ADDL_USERS" ] && [ -n "$VPN_ADDL_PASSWORDS" ]; then
     count=1
     addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -d ' ' -f 1)
     addl_password=$(printf '%s' "$VPN_ADDL_PASSWORDS" | cut -d ' ' -f 1)
     while [ -n "$addl_user" ] && [ -n "$addl_password" ]; do
-      printf '%s\n' "$addl_user" >> /etc/ipsec.d/eap-users
-      safe_user=$(printf '%s' "$addl_user" | tr -c 'A-Za-z0-9_.-' '_')
-      write_mobileconfig "$addl_user" "$addl_password" "/etc/ipsec.d/${safe_user}.mobileconfig" "$include_eap_pass"
+      write_user_profiles "$addl_user" "$addl_password"
       count=$((count + 1))
       addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -s -d ' ' -f "$count")
       addl_password=$(printf '%s' "$VPN_ADDL_PASSWORDS" | cut -s -d ' ' -f "$count")
@@ -1096,11 +1246,11 @@ charon {
     install_routes = yes
     make_before_break = yes
     filelog {
-        stdout {
+        /var/log/charon {
             default = 1
             ike = 1
             knl = 1
-            cfg = 2
+            cfg = 1
             net = 1
             ike_name = yes
             append = yes
@@ -1109,6 +1259,8 @@ charon {
     }
 }
 EOF
+touch /var/log/charon
+chmod 644 /var/log/charon
 
 charon_bin=
 for c in /usr/lib/strongswan/charon /usr/lib/ipsec/charon /usr/libexec/ipsec/charon /usr/sbin/charon; do
@@ -1119,7 +1271,7 @@ for c in /usr/lib/strongswan/charon /usr/lib/ipsec/charon /usr/libexec/ipsec/cha
 done
 [ -n "$charon_bin" ] || exiterr "strongSwan charon was not found."
 rm -f /var/run/charon.vici /run/charon.vici
-nohup "$charon_bin" >/proc/1/fd/1 2>&1 &
+nohup "$charon_bin" >>/var/log/charon 2>&1 &
 charon_pid=$!
 echo "$charon_pid" > /var/run/charon.pid
 disown "$charon_pid" 2>/dev/null || true
@@ -1135,19 +1287,26 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 [ "$vici_ready" = 1 ] || exiterr "Timed out waiting for the strongSwan vici socket."
-swanctl --load-all || exiterr "swanctl --load-all failed."
+swanctl_out=$(mktemp)
+if ! swanctl --load-all >"$swanctl_out" 2>&1; then
+  echo "Error: swanctl --load-all failed." >&2
+  grep -viE 'secret *=|password|PRIVATE KEY' "$swanctl_out" >&2 || true
+  rm -f "$swanctl_out"
+  exit 1
+fi
+rm -f "$swanctl_out"
 export charon_bin
 (
   while true; do
     sleep 20
     if [ ! -S /var/run/charon.vici ] && [ ! -S /run/charon.vici ]; then
       echo "strongSwan charon is down; restarting..." >&2
-      nohup "$charon_bin" >/proc/1/fd/1 2>&1 &
+      nohup "$charon_bin" >>/var/log/charon 2>&1 &
       echo $! > /var/run/charon.pid
       waited=0
       while [ "$waited" -lt 50 ]; do
         if [ -S /var/run/charon.vici ] || [ -S /run/charon.vici ]; then
-          swanctl --load-all >&2 || true
+          swanctl --load-all >>/var/log/charon 2>&1 || true
           break
         fi
         waited=$((waited + 1))
@@ -1155,7 +1314,7 @@ export charon_bin
       done
     fi
   done
-) >/proc/1/fd/1 2>&1 &
+) &
 disown $! 2>/dev/null || true
 
 if [ -n "$VPN_DNS_NAME" ]; then
@@ -1164,7 +1323,25 @@ else
   server_text="Server IP"
 fi
 
+if [ "$ikev2_volume" = yes ]; then
+  ikev2_log_tmp=$(mktemp)
+  if ikev2.sh --auto >"$ikev2_log_tmp" 2>"${ikev2_log_tmp}.err"; then
+    if [ -s "$ikev2_log_tmp" ]; then
+      cp "$ikev2_log_tmp" /etc/ipsec.d/ikev2setup.log
+      chmod 600 /etc/ipsec.d/ikev2setup.log
+    fi
+  else
+    echo "Warning: IKEv2 certificate client setup failed." >&2
+    if [ -s "${ikev2_log_tmp}.err" ]; then
+      grep -viE 'PRIVATE KEY|secret *=|password' "${ikev2_log_tmp}.err" >&2 || true
+    fi
+  fi
+  rm -f "$ikev2_log_tmp" "${ikev2_log_tmp}.err"
+fi
+
+printed_vpn_credentials=no
 if [ "$disable_ipsec_l2tp" != yes ] || [ "$disable_ipsec_xauth" != yes ]; then
+printed_vpn_credentials=yes
 cat <<EOF
 
 ================================================
@@ -1205,10 +1382,20 @@ VPN client setup: https://vpnsetup.net/clients2
 EOF
 fi
 
-if [ "$ikev2_enabled" = yes ]; then
-  if ! swanctl --list-conns 2>/dev/null | grep -q 'ikev2-eap'; then
-    echo "Warning: IKEv2 EAP-MSCHAPv2 connection was not loaded." >&2
-  fi
+if [ "$ikev2_volume" = yes ] && [ -s /etc/ipsec.d/ikev2setup.log ]; then
+  echo
+  cat /etc/ipsec.d/ikev2setup.log
+fi
+
+conn_list=$(swanctl --list-conns 2>/dev/null || true)
+if [ "$ikev2_volume" = yes ] && ! printf '%s\n' "$conn_list" | grep -q 'ikev2-cert'; then
+  echo "Warning: IKEv2 certificate connection was not loaded." >&2
+fi
+if [ "$eap_enabled" = yes ] && ! printf '%s\n' "$conn_list" | grep -q 'ikev2-eap'; then
+  echo "Warning: IKEv2 EAP-MSCHAPv2 connection was not loaded." >&2
+fi
+
+if [ "$eap_enabled" = yes ]; then
 cat <<EOF
 
 ================================================
@@ -1216,21 +1403,56 @@ cat <<EOF
 IKEv2 EAP-MSCHAPv2 is ready.
 
 $server_text: $server_addr
-Username: $VPN_USER
-Password: $VPN_PASSWORD
 Client address pool: $IKEV2_POOL
 CA certificate: /etc/ipsec.d/ca.crt
-Apple profile: /etc/ipsec.d/$(printf '%s' "$VPN_USER" | tr -c 'A-Za-z0-9_.-' '_').mobileconfig
+EOF
+  if [ "$printed_vpn_credentials" = no ]; then
+cat <<EOF
+Username: $VPN_USER
+Password: $VPN_PASSWORD
+EOF
+    if [ -n "$VPN_ADDL_USERS" ] && [ -n "$VPN_ADDL_PASSWORDS" ]; then
+      count=1
+      addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -d ' ' -f 1)
+      addl_password=$(printf '%s' "$VPN_ADDL_PASSWORDS" | cut -d ' ' -f 1)
+      echo
+      echo "Additional VPN users (username | password):"
+      while [ -n "$addl_user" ] && [ -n "$addl_password" ]; do
+        printf '%s | %s\n' "$addl_user" "$addl_password"
+        count=$((count + 1))
+        addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -s -d ' ' -f "$count")
+        addl_password=$(printf '%s' "$VPN_ADDL_PASSWORDS" | cut -s -d ' ' -f "$count")
+      done
+    fi
+  fi
+  echo "PKCS#12 CA: /etc/ipsec.d/eap-$(printf '%s' "$VPN_USER" | tr -c 'A-Za-z0-9_.-' '_').p12"
+  echo "strongSwan profile: /etc/ipsec.d/eap-$(printf '%s' "$VPN_USER" | tr -c 'A-Za-z0-9_.-' '_').sswan"
+  echo "Apple profile: /etc/ipsec.d/eap-$(printf '%s' "$VPN_USER" | tr -c 'A-Za-z0-9_.-' '_').mobileconfig"
+  if [ -n "$VPN_ADDL_USERS" ]; then
+    count=1
+    addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -d ' ' -f 1)
+    while [ -n "$addl_user" ]; do
+      echo "PKCS#12 CA: /etc/ipsec.d/eap-$(printf '%s' "$addl_user" | tr -c 'A-Za-z0-9_.-' '_').p12"
+      echo "strongSwan profile: /etc/ipsec.d/eap-$(printf '%s' "$addl_user" | tr -c 'A-Za-z0-9_.-' '_').sswan"
+      echo "Apple profile: /etc/ipsec.d/eap-$(printf '%s' "$addl_user" | tr -c 'A-Za-z0-9_.-' '_').mobileconfig"
+      count=$((count + 1))
+      addl_user=$(printf '%s' "$VPN_ADDL_USERS" | cut -s -d ' ' -f "$count")
+    done
+  fi
+  if [ -n "$eap_p12_pass" ] && ! grep -q 'Password for client config files:' /etc/ipsec.d/ikev2setup.log 2>/dev/null; then
+    printf '\n%s\n%s\n' "*IMPORTANT* Password for client config files:" "$eap_p12_pass"
+  fi
+cat <<'EOF'
 
-Install the CA on each client, then connect with IKEv2 and
-EAP-MSCHAPv2 (username/password). The server address must match
-the certificate identity above.
+The EAP .p12 file contains the CA certificate used to trust this server.
+It is not a client certificate. The .sswan file is an IKEv2 EAP-MSCHAPv2 profile
+for the strongSwan Android app. Enter the VPN username and password when the app
+asks. Certificate IKEv2 uses the separate <client>.p12, <client>.sswan and
+<client>.mobileconfig files.
 
-Windows: VPN type IKEv2, authentication "Microsoft: Secured password (EAP-MSCHAP v2)".
-Android 11+: IKEv2/IPSec MSCHAPv2.
-iOS/macOS: install the .mobileconfig profile, then enable full trust for the CA.
-
-List users: docker exec <container> ikev2.sh --listclients
+Windows: import the CA, then use IKEv2 with "Microsoft: Secured password (EAP-MSCHAP v2)".
+Android: import the EAP .sswan file, or use IKEv2/IPSec MSCHAPv2 on Android 11+.
+iOS/macOS: install the EAP .mobileconfig profile, then enable full trust for the CA.
 
 ================================================
 
